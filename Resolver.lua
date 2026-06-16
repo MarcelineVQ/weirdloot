@@ -118,23 +118,76 @@ function addon:RollCandidates(candidates)
     return rolls
 end
 
+local function formatCandidateSummary(candidate)
+    local parts = {
+        candidate.name or "Unknown",
+        util:TitleCaseWords(string.trim((candidate.className or "") .. " " .. (candidate.specName or ""))),
+        util:PlayerDisplayStatus(candidate.status),
+    }
+
+    return table.concat(parts, " - ")
+end
+
+function addon:IsCandidateNamedForItem(namedRule, candidateName)
+    if not namedRule or not namedRule.tiers then
+        return false
+    end
+
+    local candidateKey = util:NormalizeKey(candidateName or "")
+    for _, tier in ipairs(namedRule.tiers) do
+        for _, entry in ipairs(tier.entries or {}) do
+            if not entry.isRest and entry.playerKey == candidateKey then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
 function addon:BuildResultDetail(result)
     local lines = {}
     local quantityText = (result.quantity or 1) > 1 and string.format(" x%d", result.quantity or 1) or ""
     lines[#lines + 1] = "Item: " .. (result.itemName or "") .. quantityText
-    lines[#lines + 1] = "All rollers: " .. (#result.allRollers > 0 and table.concat(result.allRollers, ", ") or "none")
-    lines[#lines + 1] = "Named tier: " .. (result.namedTierText or "none")
-    lines[#lines + 1] = "Class/spec tier: " .. (result.lootTierText or "none")
-    lines[#lines + 1] = "Status tier: " .. (result.statusTierText or "none")
-    lines[#lines + 1] = "Prioritized players: " .. (#result.prioritizedNames > 0 and table.concat(result.prioritizedNames, ", ") or "none")
-
-    local rollParts = {}
-    for _, roll in ipairs(result.finalRolls or {}) do
-        rollParts[#rollParts + 1] = string.format("%s (%s)", roll.name, roll.auto and "AUTO" or tostring(roll.roll))
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "All Rollers -"
+    if #(result.allRollerDetails or {}) == 0 then
+        lines[#lines + 1] = "none"
+    else
+        for _, roller in ipairs(result.allRollerDetails or {}) do
+            local rollText = roller.rollText and (" - (" .. roller.rollText .. ")") or ""
+            lines[#lines + 1] = formatCandidateSummary(roller) .. rollText
+        end
     end
 
-    lines[#lines + 1] = "Prioritized rolls: " .. (#rollParts > 0 and table.concat(rollParts, ", ") or "none")
-    lines[#lines + 1] = "Winner(s): " .. (result.winnersText or result.winner or "none")
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "LC Names:"
+    lines[#lines + 1] = ((result.lcNamesText and result.lcNamesText ~= "") and result.lcNamesText or "none")
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Spec Priority:"
+    lines[#lines + 1] = ((result.specPriorityText and result.specPriorityText ~= "") and result.specPriorityText or "none")
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Rolls:"
+    if #(result.rollDetails or {}) == 0 then
+        lines[#lines + 1] = "none"
+    else
+        for _, roll in ipairs(result.rollDetails or {}) do
+            local rollValue = roll.auto and "AUTO" or tostring(roll.roll or "")
+            local namedText = roll.isNamed and " - Named" or ""
+            lines[#lines + 1] = string.format("%s - (%s)%s", formatCandidateSummary(roll), rollValue, namedText)
+        end
+    end
+
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "Winner:"
+    if #(result.winnerDetails or {}) == 0 then
+        lines[#lines + 1] = "No winner"
+    else
+        for _, winner in ipairs(result.winnerDetails or {}) do
+            local rollValue = winner.auto and "AUTO" or tostring(winner.roll or "")
+            lines[#lines + 1] = string.format("%s (%s)", winner.name or "Unknown", rollValue)
+        end
+    end
     return table.concat(lines, "\n")
 end
 
@@ -154,7 +207,7 @@ function addon:SelectWinningRolls(rolls, quantity)
     return winners
 end
 
-function addon:BuildResultRecord(item, allRollerNames, namedTierText, lootTierText, statusRank, prioritizedNames, rolls)
+function addon:BuildResultRecord(item, allRollerNames, allRollerDetails, lcNamesText, specPriorityText, statusRank, prioritizedNames, rolls, rollDetails, winnerDetails)
     local winners = self:SelectWinningRolls(rolls, item.quantity or 1)
     local winnersText = #winners > 0 and table.concat(winners, ", ") or "No winner"
     local result = {
@@ -164,11 +217,14 @@ function addon:BuildResultRecord(item, allRollerNames, namedTierText, lootTierTe
         itemIcon = item.icon,
         quantity = item.quantity or 1,
         allRollers = allRollerNames,
-        namedTierText = namedTierText,
-        lootTierText = lootTierText,
+        allRollerDetails = allRollerDetails or {},
+        lcNamesText = lcNamesText,
+        specPriorityText = specPriorityText,
         statusTierText = statusRank == 3 and "Main" or (statusRank == 2 and "Designated Alt" or "Nil"),
         prioritizedNames = prioritizedNames,
         finalRolls = rolls,
+        rollDetails = rollDetails or {},
+        winnerDetails = winnerDetails or {},
         winners = winners,
         winnersText = winnersText,
         winner = winners[1] or "No winner",
@@ -195,8 +251,15 @@ function addon:ProcessLoot()
     for _, item in ipairs(session.items or {}) do
         local rollers = self:BuildRollerList(item.id)
         local allRollerNames = {}
+        local allRollerDetails = {}
         for _, roller in ipairs(rollers) do
             allRollerNames[#allRollerNames + 1] = roller.name
+            allRollerDetails[#allRollerDetails + 1] = {
+                name = roller.name,
+                className = roller.className,
+                specName = roller.specName,
+                status = roller.status,
+            }
         end
 
         local namedRule = self:GetNamedRule(item.name)
@@ -222,35 +285,101 @@ function addon:ProcessLoot()
             local statusSurvivors, rank = self:FilterByStatus(prioritized)
             local rolls = self:RollCandidates(statusSurvivors)
             local prioritizedNames = {}
+            local rollDetails = {}
+            local rollByName = {}
             for _, player in ipairs(statusSurvivors) do
                 prioritizedNames[#prioritizedNames + 1] = player.name
+            end
+            for _, roll in ipairs(rolls) do
+                rollByName[util:NormalizeKey(roll.name)] = roll
+            end
+            for _, roller in ipairs(statusSurvivors) do
+                local matchedRoll = rollByName[util:NormalizeKey(roller.name)]
+                rollDetails[#rollDetails + 1] = {
+                    name = roller.name,
+                    className = roller.className,
+                    specName = roller.specName,
+                    status = roller.status,
+                    roll = matchedRoll and matchedRoll.roll or nil,
+                    auto = matchedRoll and matchedRoll.auto or false,
+                    isNamed = self:IsCandidateNamedForItem(namedRule, roller.name),
+                }
+            end
+            for _, detail in ipairs(allRollerDetails) do
+                local matchedRoll = rollByName[util:NormalizeKey(detail.name)]
+                detail.rollText = matchedRoll and (matchedRoll.auto and "AUTO" or tostring(matchedRoll.roll)) or nil
+            end
+            local winnerDetails = {}
+            for _, winnerName in ipairs(self:SelectWinningRolls(rolls, item.quantity or 1)) do
+                local matchedRoll = rollByName[util:NormalizeKey(winnerName)]
+                winnerDetails[#winnerDetails + 1] = {
+                    name = winnerName,
+                    roll = matchedRoll and matchedRoll.roll or nil,
+                    auto = matchedRoll and matchedRoll.auto or false,
+                }
             end
 
             results[#results + 1] = self:BuildResultRecord(
                 item,
                 allRollerNames,
-                nil,
-                lootTier and lootTier.raw or nil,
+                allRollerDetails,
+                namedRule and namedRule.raw or nil,
+                lootRule and lootRule.raw or nil,
                 rank,
                 prioritizedNames,
-                rolls
+                rolls,
+                rollDetails,
+                winnerDetails
             )
         else
             local statusSurvivors, rank = self:FilterByStatus(prioritized)
             local rolls = self:RollCandidates(statusSurvivors)
             local prioritizedNames = {}
+            local rollDetails = {}
+            local rollByName = {}
             for _, player in ipairs(statusSurvivors) do
                 prioritizedNames[#prioritizedNames + 1] = player.name
+            end
+            for _, roll in ipairs(rolls) do
+                rollByName[util:NormalizeKey(roll.name)] = roll
+            end
+            for _, roller in ipairs(statusSurvivors) do
+                local matchedRoll = rollByName[util:NormalizeKey(roller.name)]
+                rollDetails[#rollDetails + 1] = {
+                    name = roller.name,
+                    className = roller.className,
+                    specName = roller.specName,
+                    status = roller.status,
+                    roll = matchedRoll and matchedRoll.roll or nil,
+                    auto = matchedRoll and matchedRoll.auto or false,
+                    isNamed = self:IsCandidateNamedForItem(namedRule, roller.name),
+                }
+            end
+            for _, detail in ipairs(allRollerDetails) do
+                local matchedRoll = rollByName[util:NormalizeKey(detail.name)]
+                detail.rollText = matchedRoll and (matchedRoll.auto and "AUTO" or tostring(matchedRoll.roll)) or nil
+            end
+            local winnerDetails = {}
+            for _, winnerName in ipairs(self:SelectWinningRolls(rolls, item.quantity or 1)) do
+                local matchedRoll = rollByName[util:NormalizeKey(winnerName)]
+                winnerDetails[#winnerDetails + 1] = {
+                    name = winnerName,
+                    roll = matchedRoll and matchedRoll.roll or nil,
+                    auto = matchedRoll and matchedRoll.auto or false,
+                }
             end
 
             results[#results + 1] = self:BuildResultRecord(
                 item,
                 allRollerNames,
-                namedTier and namedTier.raw or nil,
-                nil,
+                allRollerDetails,
+                namedRule and namedRule.raw or nil,
+                lootRule and lootRule.raw or nil,
                 rank,
                 prioritizedNames,
-                rolls
+                rolls,
+                rollDetails,
+                winnerDetails
             )
         end
     end
@@ -263,8 +392,8 @@ function addon:ProcessLoot()
         results = util:CloneTable(results),
     }
 
-    for _, result in ipairs(results) do
-        SendChatMessage(result.summary, "RAID")
+    if #results > 0 then
+        SendChatMessage("Loot has been rolled on, check the Results tab.", "RAID_WARNING")
     end
 
     self:BroadcastResults(results)
