@@ -365,6 +365,8 @@ end
 
 function addon:PLAYER_LOGIN()
     WeirdLootDB = ensureDefaults(WeirdLootDB, {
+        testMode = false,        -- in-city testing: treat ANY bag item as session loot
+        autoRoll = true,         -- newly-looted/traded-in items auto-start a live roll
         config = {
             rosterImportText = defaultRosterImportText,
             rosterEntries = addon.defaultRosterEntries,
@@ -424,6 +426,7 @@ function addon:PLAYER_LOGIN()
 
     self.db = WeirdLootDB
     self.sessionDb = WeirdLootSessionDB
+    self.bagPrimed = false       -- prime the bag delta baseline on the first BAG_UPDATE this login
 
     if self.sessionDb.activeSession ~= nil then
         local legacySession = self.sessionDb.activeSession
@@ -447,6 +450,8 @@ function addon:PLAYER_LOGIN()
     self:InitializeSession()
     self:InitializeComm()
     self:InitializeResolver()
+    self:InitializePayout()
+    self:InitializeLiveRoll()
     self:InitializeUI()
 
     self.events:RegisterEvent("RAID_ROSTER_UPDATE")
@@ -456,18 +461,88 @@ function addon:PLAYER_LOGIN()
     self.events:RegisterEvent("PLAYER_ENTERING_WORLD")
     self.events:RegisterEvent("BAG_UPDATE")
     self.events:RegisterEvent("PLAYER_REGEN_ENABLED")
+    self.events:RegisterEvent("LOOT_OPENED")
+    self.events:RegisterEvent("LOOT_BIND_CONFIRM")
 
     self:RefreshAll()
+    self:ResumePayoutMode()      -- a session restored from SavedVariables keeps payout mode on
     self:Print("Loaded. Use /weirdloot to open the window.")
+end
+
+-- Zone-in prompt (RCLootCouncil model): on entering a raid instance as the loot
+-- master with no session running, offer to start one. Declining is remembered until
+-- we leave the raid, so it isn't re-asked on every loading screen inside the instance.
+StaticPopupDialogs["WEIRDLOOT_START_SESSION"] = {
+    text = "Start a WeirdLoot session for this raid?",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function() addon:StartLootSession() end,
+    OnCancel = function() addon.raidPrompt.declined = true end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+    showAlert = 1,
+}
+
+function addon:MaybePromptStartSession()
+    self.raidPrompt = self.raidPrompt or { declined = false }
+    local _, instanceType = IsInInstance()
+    if instanceType ~= "raid" then
+        self.raidPrompt.declined = false       -- reset once we've left the raid
+        return
+    end
+    if self.session.active then return end
+    if not self:IsAuthorizedLootMaster() then return end
+    if self.raidPrompt.declined then return end
+    StaticPopup_Show("WEIRDLOOT_START_SESSION")
+end
+
+-- Delayed loot-master re-check (RCLootCouncil's NewMLCheck pattern). At login the client
+-- hasn't received the loot method / raid roster yet, so a single check can miss ML status,
+-- and PARTY_LOOT_METHOD_CHANGED won't re-fire if nothing actually changed. 3.3.5 has no
+-- C_Timer, so we drive a few re-checks off an OnUpdate frame over the first few seconds.
+local AUTH_RETRY_TIMES = { 0.5, 1.5, 3.0, 5.0 }
+local authRetry = CreateFrame("Frame")
+authRetry:Hide()
+authRetry:SetScript("OnUpdate", function(frame, dt)
+    frame.elapsed = (frame.elapsed or 0) + dt
+    local target = AUTH_RETRY_TIMES[frame.index or 1]
+    if not target then frame:Hide(); return end
+    if frame.elapsed >= target then
+        frame.index = (frame.index or 1) + 1
+        addon:RecheckLootAuthority()
+    end
+end)
+
+function addon:ScheduleAuthorityRecheck()
+    authRetry.elapsed = 0
+    authRetry.index = 1
+    authRetry:Show()
+end
+
+-- Re-evaluate authority; if we only NOW resolve as ML (data finally arrived), run the
+-- ML-on-login work the early PLAYER_ENTERING_WORLD check skipped.
+function addon:RecheckLootAuthority()
+    local was = self.roster.isLootMaster
+    self:RefreshLootAuthority()
+    if self.roster.isLootMaster and not was then
+        self:AutoBroadcastSession(true)
+        self:ResumePayoutMode()
+        self:RestorePendingPopups()
+        self:MaybePromptStartSession()
+    end
 end
 
 function addon:PLAYER_ENTERING_WORLD()
     self:RefreshAll()
     if self:IsAuthorizedLootMaster() then
         self:AutoBroadcastSession(true)
+        self:RestorePendingPopups()     -- re-show pending items the ML hadn't decided on
     else
         self:RequestSessionSync()
     end
+    self:MaybePromptStartSession()
+    self:ScheduleAuthorityRecheck()     -- catch ML status that lands after the data settles
 end
 
 function addon:RAID_ROSTER_UPDATE()
@@ -485,6 +560,7 @@ end
 function addon:PARTY_LOOT_METHOD_CHANGED()
     self:RefreshLootAuthority()
     self:TriggerCallback("AUTHORITY_UPDATED")
+    self:MaybePromptStartSession()      -- becoming ML in a raid offers a session too
 end
 
 function addon:BAG_UPDATE()
@@ -501,8 +577,40 @@ function addon:HandleSlashCommand(msg)
     local command = string.lower(string.trim(msg or ""))
     if command == "start" then
         self:StartLootSession()
+    elseif command == "end" or command == "stop" or command == "clear" then
+        self:ClearSession()
+        self:Print("Loot session ended.")
     elseif command == "scan" then
         self:RefreshSessionItems(true)
+    elseif command == "payout" then
+        self:StartPayout()
+    elseif command == "payout stop" or command == "payout off" then
+        self:StopPayout()
+    elseif command == "payout clear" then
+        if self.payout then
+            self.payout:StopPayout()
+            self.payout:ClearOwed()
+            self:Print("Payout ledger cleared.")
+            if self.ui and self.ui.masterPanel then self:RefreshMasterTab() end
+        end
+    elseif command == "test" then
+        self.db.testMode = not self.db.testMode
+        self:Print("Test mode " .. (self.db.testMode
+            and "ON - every item in your bags counts as session loot (city testing)."
+            or "OFF - only tradable epics count."))
+        self:RefreshSessionItems(true)
+    elseif command == "autoroll" then
+        self.db.autoRoll = not self.db.autoRoll
+        self:Print("Auto-roll on new loot " .. (self.db.autoRoll and "ON." or "OFF (right-click an item to roll manually)."))
+    elseif command == "deer" or string.sub(command, 1, 5) == "deer " then
+        local name = string.match(string.trim(msg or ""), "^%S+%s+(.+)$")
+        if name and string.trim(name) ~= "" then
+            self.db.deer = string.trim(name)
+            self:Print("Disenchanter set to " .. self.db.deer .. " (non-epic BoE auto-routes there).")
+        else
+            self.db.deer = nil
+            self:Print("Disenchanter cleared.")
+        end
     else
         self:ToggleMainFrame()
     end

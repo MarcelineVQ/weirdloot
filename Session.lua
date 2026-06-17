@@ -18,6 +18,7 @@ local function buildSessionState(ownerKey)
         responses = {},
         results = {},
         lockedItems = {},
+        pendingLinks = {},
         attendees = {},
     }
 end
@@ -106,17 +107,19 @@ function addon:InitializeSession()
     self.session = session
     self.session.ownerKey = ownerKey
     self.session.lockedItems = self.session.lockedItems or {}
+    self.session.pendingLinks = self.session.pendingLinks or {}
 end
 
 function addon:BuildBagSnapshot()
     local snapshot = {}
+    local minQuality = (self.db and self.db.testMode) and 0 or 4   -- test mode: any item
 
     for bag = 0, MAX_BAG_ID do
         local slots = GetContainerNumSlots(bag) or 0
         for slot = 1, slots do
             local link = GetContainerItemLink(bag, slot)
             local _, count, _, quality = GetContainerItemInfo(bag, slot)
-            if link and count and quality and quality >= 4 then
+            if link and count and quality and quality >= minQuality then
                 snapshot[link] = (snapshot[link] or 0) + count
             end
         end
@@ -140,6 +143,8 @@ end
 
 function addon:BuildTradeableEpicCounts()
     local counts = {}
+    local testMode = self.db and self.db.testMode
+    local minQuality = testMode and 0 or 4
     local tooltip = getTradeScanTooltip()
 
     for bag = 0, MAX_BAG_ID do
@@ -147,7 +152,20 @@ function addon:BuildTradeableEpicCounts()
         for slot = 1, slots do
             local link = GetContainerItemLink(bag, slot)
             local _, count, _, quality = GetContainerItemInfo(bag, slot)
-            if link and count and quality and quality >= 4 then
+            if testMode and link and count and quality and quality >= minQuality then
+                -- city testing: any bag item is eligible EXCEPT soulbound ones (those
+                -- can't be traded). A trade-window item is soulbound but tradeable, so
+                -- still allow it.
+                tooltip:ClearLines()
+                tooltip:SetOwner(WorldFrame or UIParent, "ANCHOR_NONE")
+                tooltip:SetBagItem(bag, slot)
+                tooltip:Show()
+                local soulbound = tooltipHasLine(tooltip, ITEM_SOULBOUND, "soulbound")
+                local tradeWindow = tooltipHasLine(tooltip, nil, "you may trade this item")
+                if (not soulbound) or tradeWindow then
+                    counts[link] = (counts[link] or 0) + count
+                end
+            elseif link and count and quality and quality >= minQuality then
                 local bindType = select(14, GetItemInfo(link))
                 local isBindOnEquip = bindType == 2
                 local isTemporarilyTradeable = false
@@ -204,12 +222,17 @@ function addon:StartLootSession()
     self.session.responses = {}
     self.session.results = {}
     self.session.lockedItems = {}
+    self.session.pendingLinks = {}
     self.session.attendees = util:CloneTable(self:GetAttendees())
 
     self.sessionDb.history = self.sessionDb.history or {}
 
+    -- Payout mode is on for the duration of the session: as live-roll winners get
+    -- owed, a winner opening a trade with the ML auto-fills.
+    self:ResumePayoutMode()
+
     self:TriggerCallback("SESSION_UPDATED")
-    self:Print("Loot session started.")
+    self:Print("Loot session started. Payout mode ON.")
 end
 
 function addon:ClearSession()
@@ -220,6 +243,7 @@ function addon:ClearSession()
     self.session.responses = {}
     self.session.results = {}
     self.session.lockedItems = {}
+    self.session.pendingLinks = {}
     self:TriggerCallback("SESSION_UPDATED")
 end
 
@@ -234,7 +258,14 @@ function addon:BuildSessionItemList(includeAllEpics)
     end
 
     local currentSnapshot = self:BuildBagSnapshot()
-    session.currentSnapshot = currentSnapshot
+    -- Do NOT clobber the delta baseline here. At login the bags may not be fully loaded,
+    -- so storing this partial scan as session.currentSnapshot makes the next BAG_UPDATE
+    -- diff the real bag against an empty baseline and auto-roll already-present loot. The
+    -- baseline is owned by StartLootSession (init) and OnBagUpdate (delta); only prime it
+    -- if it has never been set.
+    if session.currentSnapshot == nil then
+        session.currentSnapshot = currentSnapshot
+    end
 
     local tradeableCounts = self:BuildTradeableEpicCounts()
     local sortedLinks = {}
@@ -313,17 +344,44 @@ function addon:OnBagUpdate()
     end
 
     local currentSnapshot = self:BuildBagSnapshot()
-    if not self:HasAddedEpicLoot(currentSnapshot) then
+
+    -- First bag scan after login/reload: establish the delta baseline as the actual
+    -- current bag WITHOUT auto-rolling. The restored snapshot can disagree with the real
+    -- bag (or the bags weren't loaded when it was built), which would otherwise make
+    -- already-present loot look "newly added" and re-roll it. Priming once fixes that
+    -- while still letting genuine future drops (incl. duplicate stacks) roll normally.
+    if not self.bagPrimed then
         session.currentSnapshot = currentSnapshot
+        self.bagPrimed = true
         return false
     end
 
+    local previous = session.currentSnapshot or {}
+
+    -- which item links gained count since the last scan -- i.e. were just looted or
+    -- traded in. These are the candidates for an automatic live roll.
+    local added = {}
+    local anyAdded = false
+    for link, count in pairs(currentSnapshot) do
+        if count > (previous[link] or 0) then
+            added[link] = true
+            anyAdded = true
+        end
+    end
+
     session.currentSnapshot = currentSnapshot
+    if not anyAdded then
+        return false
+    end
+
     if session.scanMode == "all" then
         self:RefreshSessionItems(true)
     else
         self:RefreshSessionItems()
     end
+
+    -- newly-arrived loot auto-starts a live roll (loot-master only, gated inside)
+    self:AutoRollAddedItems(added)
     return true
 end
 

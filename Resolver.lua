@@ -775,6 +775,7 @@ function addon:ProcessLoot()
         SendChatMessage("Loot has been rolled on, check the Results tab.", "RAID_WARNING")
     end
 
+    self:OwePayout(results)        -- queue winners into the auto-trade payout ledger
     self:BroadcastResults(results)
     self:BroadcastSessionLocks()
     self:TriggerCallback("RESULTS_UPDATED")

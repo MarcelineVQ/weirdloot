@@ -105,40 +105,63 @@ function addon:GetRosterDisplayList()
     return self.roster.rosterDisplay or {}
 end
 
+local function stripRealm(name)
+    return name and string.match(name, "^[^-]+") or name
+end
+
+-- Determine the master looter's name and whether *we* drive WeirdLoot, robustly across
+-- every group shape (mirrors RCLootCouncil's GetML): raid master-loot, party master-loot,
+-- raid leader/assistant, party leader, and solo. The leadership fallback only applies when
+-- no master looter is set, matching RCLootCouncil (under master loot, only the ML runs it).
 function addon:RefreshLootAuthority()
-    local lootMasterName
-    local lootMethod, _, raidIndex = GetLootMethod()
-
-    if lootMethod == "master" and raidIndex then
-        local name = GetRaidRosterInfo(raidIndex)
-        lootMasterName = name and string.match(name, "^[^-]+") or name
-    end
-
     local playerName = util:GetPlayerName("player")
-    local isLeader = false
-    local isOfficer = false
-    local isLootMaster = false
+    local method, partyMasterIndex, raidMasterIndex = GetLootMethod()
+    local numRaid = GetNumRaidMembers() or 0
+    local numParty = GetNumPartyMembers() or 0
 
-    for index = 1, (GetNumRaidMembers() or 0) do
-        local name, rank = GetRaidRosterInfo(index)
-        name = name and string.match(name, "^[^-]+") or name
-        if playerName and name and util:NormalizeKey(name) == util:NormalizeKey(playerName) then
-            isLeader = rank == 2
-            isOfficer = rank == 1
-            break
+    -- 1) who is the master looter?
+    local lootMasterName
+    if method == "master" then
+        if raidMasterIndex and raidMasterIndex > 0 then
+            lootMasterName = stripRealm(GetRaidRosterInfo(raidMasterIndex))   -- ML in raid
+        elseif partyMasterIndex == 0 then
+            lootMasterName = playerName                                        -- we are party ML
+        elseif partyMasterIndex and partyMasterIndex > 0 then
+            lootMasterName = stripRealm(UnitName("party" .. partyMasterIndex)) -- party member ML
         end
     end
 
+    -- 2) are we leadership (or solo)?
+    local isLeader = false
+    if numRaid > 0 then
+        for index = 1, numRaid do
+            local name, rank = GetRaidRosterInfo(index)
+            if playerName and name and util:NormalizeKey(stripRealm(name)) == util:NormalizeKey(playerName) then
+                isLeader = (rank == 2) or (rank == 1)    -- raid leader or assistant
+                break
+            end
+        end
+    elseif numParty > 0 then
+        isLeader = IsPartyLeader() and true or false     -- party leader
+    else
+        -- Solo: only act as loot master in explicit test mode (city testing). Otherwise a
+        -- normal member logged in alone would wrongly think they're the ML and could
+        -- whisper / auto-trade raiders.
+        isLeader = (self.db and self.db.testMode) and true or false
+    end
+
+    -- 3) resolve authority
+    local isLootMaster = false
     if lootMasterName and playerName then
         isLootMaster = util:NormalizeKey(lootMasterName) == util:NormalizeKey(playerName)
     end
 
-    if not lootMasterName and (isLeader or isOfficer) then
-        lootMasterName = playerName
+    if not isLootMaster and isLeader and method ~= "master" then
+        isLootMaster = true                              -- leadership fallback (no ML set)
     end
 
-    if not isLootMaster and (isLeader or isOfficer) and lootMethod ~= "master" then
-        isLootMaster = true
+    if not lootMasterName and isLeader then
+        lootMasterName = playerName
     end
 
     self.roster.lootMasterName = lootMasterName

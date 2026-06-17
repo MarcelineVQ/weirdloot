@@ -355,5 +355,13 @@ function addon:HandleCommMessage(sender, logical)
         self:TriggerCallback("RESULTS_UPDATED")
     elseif command == "RESULTS_DONE" then
         self:TriggerCallback("RESULTS_UPDATED")
+    elseif command == "DROP" then
+        self:OnDropMessage(fields)
+    elseif command == "RSP" then
+        self:OnRspMessage(sender, fields)
+    elseif command == "WIN" then
+        self:OnWinMessage(fields)
+    elseif command == "CANCEL" then
+        self:OnCancelMessage(fields)
     end
 end

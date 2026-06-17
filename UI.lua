@@ -212,6 +212,18 @@ local function createButton(parent, text, width, height)
     return button
 end
 
+-- attach a hover tooltip (title + wrapped body) to a button
+local function setButtonTooltip(button, title, body)
+    button:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:ClearLines()
+        GameTooltip:AddLine(title, 1, 0.82, 0)
+        if body then GameTooltip:AddLine(body, 1, 1, 1, true) end
+        GameTooltip:Show()
+    end)
+    button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+end
+
 local function createLootChoiceButton(parent, label, width)
     local button = CreateFrame("Button", nil, parent)
     button:SetWidth(width or 28)
@@ -543,25 +555,12 @@ function addon:TradeSelectedWinner()
     end
 end
 
-function addon:LoadSelectedItemForTrade()
-    local result = self.ui and self.ui.selectedResult
-    if not result or not result.itemLink or result.itemLink == "" then
-        self:Print("No item is selected to load.")
-        return
-    end
-
-    local bag, slot = util:FindBagItemByLink(result.itemLink)
-    if not bag or not slot then
-        self:Print("Could not find that item in your bags.")
-        return
-    end
-
-    if CursorHasItem() then
-        ClearCursor()
-    end
-
-    PickupContainerItem(bag, slot)
-    self:Print(string.format("Picked up %s from bag %d slot %d. Click the trade slot to place it.", result.itemName or "item", bag, slot))
+-- Fill the open trade from the loot ledger via the TradeDeliver engine. Routes
+-- manual delivery through the same filler as auto-payout (stack/split-correct,
+-- soonest-to-expire first) instead of hand-placing an item, so the two never
+-- double-fill the same trade window.
+function addon:FillSelectedTrade()
+    self:FillOpenTrade()
 end
 
 function addon:UnlockAllSessionRolls()
@@ -905,7 +904,18 @@ function addon:BuildLootTab()
         end)
 
         row:SetScript("OnClick", function(selfRow, button)
-            if button ~= "LeftButton" or not selfRow.item or not selfRow.item.link or selfRow.item.link == "" then
+            if not selfRow.item or not selfRow.item.link or selfRow.item.link == "" then
+                return
+            end
+
+            if button == "RightButton" then
+                if addon:IsAuthorizedLootMaster() then
+                    addon:StartLiveRoll(selfRow.item)   -- put this item up for a live roll
+                end
+                return
+            end
+
+            if button ~= "LeftButton" then
                 return
             end
 
@@ -1227,10 +1237,10 @@ function addon:BuildResultsTab()
         addon:TradeSelectedWinner()
     end)
 
-    local loadItemButton = createButton(detailFrame, "Load Item", 100, 22)
+    local loadItemButton = createButton(detailFrame, "Fill Trade", 100, 22)
     loadItemButton:SetPoint("LEFT", tradeButton, "RIGHT", 8, 0)
     loadItemButton:SetScript("OnClick", function()
-        addon:LoadSelectedItemForTrade()
+        addon:FillSelectedTrade()
     end)
 
     local tradeHelp = createLabel(detailFrame, "", "BOTTOMLEFT", targetButton, "TOPLEFT", 0, 10)
@@ -1296,6 +1306,12 @@ function addon:BuildMasterTab()
         addon:ExportLog()
     end)
 
+    local payoutButton = createButton(panel, "Start Payout", 120, 24)
+    payoutButton:SetPoint("LEFT", exportLogButton, "RIGHT", 8, 0)
+    payoutButton:SetScript("OnClick", function()
+        addon:TogglePayout()
+    end)
+
     panel.startButton = startButton
     panel.scanButton = scanButton
     panel.broadcastButton = broadcastButton
@@ -1303,6 +1319,12 @@ function addon:BuildMasterTab()
     panel.unlockButton = unlockButton
     panel.exportWinnersButton = exportWinnersButton
     panel.exportLogButton = exportLogButton
+    panel.payoutButton = payoutButton
+
+    setButtonTooltip(payoutButton, "Payout Mode (toggle)",
+        "Turn automatic loot delivery on or off. While ON: each winner is whispered to open a trade with you, "
+        .. "and their owed items auto-fill into the trade window (you click Trade to send). Trades from non-winners "
+        .. "are declined while loot is still owed. Pause keeps the owed list but stops auto-fill.")
 
     panel.summary = createLabel(panel, "", "TOPLEFT", startButton, "BOTTOMLEFT", 0, -24)
     panel.summary:SetWidth(900)
@@ -1357,7 +1379,9 @@ function addon:RefreshLootTab()
 
         local responseChoice = self:GetPlayerResponse(item.id, playerName)
         updateLootChoiceButtons(row, responseChoice)
-        if self:IsItemLocked(item.id) then
+        local locked = self:IsItemLocked(item.id)
+        row.icon:SetDesaturated(locked)        -- grey out the item icon once it's been rolled out
+        if locked then
             for _, option in ipairs(RESPONSE_BUTTONS) do
                 row.choiceButtons[option.key]:Disable()
             end
@@ -1486,7 +1510,7 @@ function addon:RefreshResultsTab()
             self.ui.resultTradeButton:Show()
             self.ui.resultLoadItemButton:Show()
             self.ui.resultTradeHelp:Show()
-            self.ui.resultTradeHelp:SetText("Trade flow: click Target + Whisper, click Trade Winner, load item onto cursor, then click the trade slot.")
+            self.ui.resultTradeHelp:SetText("Trade flow: Target + Whisper, then Trade Winner to open the trade, then Fill Trade to auto-load their loot. Click Trade to send.")
         else
             self.ui.resultTargetButton:Disable()
             self.ui.resultTradeButton:Disable()
@@ -1520,6 +1544,7 @@ function addon:RefreshMasterTab()
         panel.processButton:Enable()
         panel.exportWinnersButton:Enable()
         panel.exportLogButton:Enable()
+        panel.payoutButton:Enable()
     else
         panel.startButton:Disable()
         panel.scanButton:Disable()
@@ -1527,6 +1552,7 @@ function addon:RefreshMasterTab()
         panel.processButton:Disable()
         panel.exportWinnersButton:Disable()
         panel.exportLogButton:Disable()
+        panel.payoutButton:Disable()
     end
 
     if panel.unlockButton then
@@ -1541,6 +1567,9 @@ function addon:RefreshMasterTab()
             panel.unlockButton:Disable()
         end
     end
+
+    local payoutActive = self.payout and self.payout:IsPayoutActive()
+    panel.payoutButton:SetText(payoutActive and "Pause Payout" or "Start Payout")
 
     local session = self:GetCurrentSession()
     local attendeeCount = #(self:GetAttendees() or {})
