@@ -307,8 +307,78 @@ function addon:SelectWinningRolls(rolls, quantity)
     return winners
 end
 
+function addon:CollectPriorityWinnerCandidates(rule, candidates, matcher, quantity, allRollByName)
+    local orderedCandidates = {}
+    local chosen = {}
+    local maxCount = quantity or 1
+
+    local function appendSortedCandidates(tierCandidates)
+        local statusSurvivors = self:FilterByStatus(tierCandidates)
+        table.sort(statusSurvivors, function(left, right)
+            local leftRoll = allRollByName[util:NormalizeKey(left.name)] and allRollByName[util:NormalizeKey(left.name)].roll or 0
+            local rightRoll = allRollByName[util:NormalizeKey(right.name)] and allRollByName[util:NormalizeKey(right.name)].roll or 0
+            if leftRoll == rightRoll then
+                return string.lower(left.name or "") < string.lower(right.name or "")
+            end
+            return leftRoll > rightRoll
+        end)
+
+        for _, candidate in ipairs(statusSurvivors) do
+            local candidateKey = util:NormalizeKey(candidate.name)
+            if not chosen[candidateKey] then
+                orderedCandidates[#orderedCandidates + 1] = candidate
+                chosen[candidateKey] = true
+                if #orderedCandidates >= maxCount then
+                    return true
+                end
+            end
+        end
+
+        return false
+    end
+
+    for _, tier in ipairs(rule and rule.tiers or {}) do
+        local tierCandidates = {}
+        local hasRest = false
+
+        for _, entry in ipairs(tier.entries or {}) do
+            if entry.isRest then
+                hasRest = true
+            else
+                for _, candidate in ipairs(candidates or {}) do
+                    local candidateKey = util:NormalizeKey(candidate.name)
+                    if not chosen[candidateKey] and matcher(entry, candidate) then
+                        tierCandidates[#tierCandidates + 1] = candidate
+                    end
+                end
+            end
+        end
+
+        if #tierCandidates == 0 and hasRest then
+            for _, candidate in ipairs(candidates or {}) do
+                local candidateKey = util:NormalizeKey(candidate.name)
+                if not chosen[candidateKey] then
+                    tierCandidates[#tierCandidates + 1] = candidate
+                end
+            end
+        end
+
+        if #tierCandidates > 0 and appendSortedCandidates(tierCandidates) then
+            break
+        end
+    end
+
+    return orderedCandidates
+end
+
 function addon:BuildResultRecord(item, allRollerNames, allRollerDetails, lcNamesText, specPriorityText, statusRank, prioritizedNames, rolls, rollDetails, winnerDetails)
-    local winners = self:SelectWinningRolls(rolls, item.quantity or 1)
+    local winners = {}
+    for _, winner in ipairs(winnerDetails or {}) do
+        winners[#winners + 1] = winner.name
+    end
+    if #winners == 0 then
+        winners = self:SelectWinningRolls(rolls, item.quantity or 1)
+    end
     local winnersText = #winners > 0 and table.concat(winners, ", ") or "No winner"
     local result = {
         itemId = item.id,
@@ -502,9 +572,19 @@ function addon:ProcessLoot()
                 }
             end
             local winnerDetails = {}
-            for _, winnerName in ipairs(self:SelectWinningRolls(rolls, item.quantity or 1)) do
+            local winnerCandidates = self:CollectPriorityWinnerCandidates(lootRule, rollers, function(entry, candidate)
+                local keyA = util:NormalizeKey((candidate.className or "") .. " " .. (candidate.specName or ""))
+                local keyB = util:NormalizeKey((candidate.specName or "") .. " " .. (candidate.className or ""))
+                for _, key in ipairs(entry.matchKeys or {}) do
+                    if key ~= "" and (key == keyA or key == keyB) then
+                        return true
+                    end
+                end
+                return false
+            end, item.quantity or 1, allRollByName)
+            for _, winnerCandidate in ipairs(winnerCandidates) do
+                local winnerName = winnerCandidate.name
                 local matchedRoll = allRollByName[util:NormalizeKey(winnerName)]
-                local winnerCandidate = survivorByName[util:NormalizeKey(winnerName)] or {}
                 winnerDetails[#winnerDetails + 1] = {
                     name = winnerName,
                     className = winnerCandidate.className,
@@ -557,9 +637,23 @@ function addon:ProcessLoot()
                 }
             end
             local winnerDetails = {}
-            for _, winnerName in ipairs(self:SelectWinningRolls(rolls, item.quantity or 1)) do
+            local winnerCandidates
+            if namedTier and namedRule then
+                winnerCandidates = self:CollectPriorityWinnerCandidates(namedRule, rollers, function(entry, candidate)
+                    return entry.playerKey == util:NormalizeKey(candidate.name)
+                end, item.quantity or 1, allRollByName)
+            else
+                winnerCandidates = {}
+                for _, winnerName in ipairs(self:SelectWinningRolls(rolls, item.quantity or 1)) do
+                    local winnerCandidate = survivorByName[util:NormalizeKey(winnerName)]
+                    if winnerCandidate then
+                        winnerCandidates[#winnerCandidates + 1] = winnerCandidate
+                    end
+                end
+            end
+            for _, winnerCandidate in ipairs(winnerCandidates) do
+                local winnerName = winnerCandidate.name
                 local matchedRoll = allRollByName[util:NormalizeKey(winnerName)]
-                local winnerCandidate = survivorByName[util:NormalizeKey(winnerName)] or {}
                 winnerDetails[#winnerDetails + 1] = {
                     name = winnerName,
                     className = winnerCandidate.className,
