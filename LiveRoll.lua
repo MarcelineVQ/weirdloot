@@ -6,9 +6,9 @@ local util = addon.util
 -- Flow: a newly-collected item surfaces a *pending* popup to the loot master only
 -- (Start Roll / Skip); nothing goes to the raid yet. When the ML presses Start Roll
 -- (or right-clicks a loot row) -> DROP broadcast -> every raider gets an interest popup
--- with the priority brackets (BiS / MS / SG / OS / TM / Pass) -> RSP back to the ML ->
+-- with the priority brackets (BiS / MS / MU / OS / TM / Pass) -> RSP back to the ML ->
 -- ML ends the roll -> winner = highest roll in the top non-empty priority section
--- (see BuildPrioSections: named loot first, then BiS/MS/SG with spec priority, then
+-- (see BuildPrioSections: named loot first, then BiS/MS/MU with spec priority, then
 -- OS/TM flat) -> WIN broadcast -> registrants get a result popup. The win also goes
 -- through the shared result/lock path and the winner is queued for payout.
 --
@@ -33,13 +33,13 @@ local function makeButton(parent, text, width)
     return b
 end
 
--- roll-choice brackets, highest priority first: BiS > MS > Sidegrade > OS > TM (Pass
+-- roll-choice brackets, highest priority first: BiS > MS > MU > OS > TM (Pass
 -- declines). Use the button's natural pressed visual to show the pick: the chosen button
 -- locks in its down state; picking a different one pops the previous back up.
-local TIER_ORDER = { "bis", "ms", "side", "os", "tm" }
-local TIER_LABEL = { bis = "BiS", ms = "MS", side = "SG", os = "OS", tm = "TM" }
+local TIER_ORDER = { "bis", "ms", "mu", "os", "tm" }
+local TIER_LABEL = { bis = "BiS", ms = "MS", mu = "MU", os = "OS", tm = "TM" }
 local function interestButtons(f)
-    return { bis = f.bisBtn, ms = f.msBtn, side = f.sideBtn, os = f.osBtn, tm = f.tmBtn, pass = f.passBtn }
+    return { bis = f.bisBtn, ms = f.msBtn, mu = f.muBtn, os = f.osBtn, tm = f.tmBtn, pass = f.passBtn }
 end
 -- chosen button: bold (outlined) green label; others: normal gold label
 local function styleButtonText(btn, chosen)
@@ -117,15 +117,15 @@ local function makePopup()
     f.count = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     f.count:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -8)
 
-    -- choice brackets (top button row): BiS > MS > Sidegrade > OS > TM > Pass
+    -- choice brackets (top button row): BiS > MS > MU > OS > TM > Pass
     f.bisBtn = makeButton(f, "BiS", 34)
     f.bisBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 8, 32)
     f.msBtn = makeButton(f, "MS", 32)
     f.msBtn:SetPoint("LEFT", f.bisBtn, "RIGHT", 3, 0)
-    f.sideBtn = makeButton(f, "SG", 34)
-    f.sideBtn:SetPoint("LEFT", f.msBtn, "RIGHT", 3, 0)
+    f.muBtn = makeButton(f, "MU", 34)
+    f.muBtn:SetPoint("LEFT", f.msBtn, "RIGHT", 3, 0)
     f.osBtn = makeButton(f, "OS", 32)
-    f.osBtn:SetPoint("LEFT", f.sideBtn, "RIGHT", 3, 0)
+    f.osBtn:SetPoint("LEFT", f.muBtn, "RIGHT", 3, 0)
     f.tmBtn = makeButton(f, "TM", 32)
     f.tmBtn:SetPoint("LEFT", f.osBtn, "RIGHT", 3, 0)
     f.passBtn = makeButton(f, "Pass", 42)
@@ -225,13 +225,13 @@ function addon:ShowInterestPopup(roll)
     f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = roll.link
     f.name:SetText(roll.link ~= "" and roll.link or roll.name or "Item")
-    f.sub:SetText("|cff88ccffPrio:|r " .. ((roll.prio and roll.prio ~= "") and roll.prio or "BiS > MS > SG > OS > TM"))
+    f.sub:SetText("|cff88ccffPrio:|r " .. ((roll.prio and roll.prio ~= "") and roll.prio or "BiS > MS > MU > OS > TM"))
     f.okBtn:Hide()
 
-    f.bisBtn:Show(); f.msBtn:Show(); f.sideBtn:Show(); f.osBtn:Show(); f.tmBtn:Show(); f.passBtn:Show()
+    f.bisBtn:Show(); f.msBtn:Show(); f.muBtn:Show(); f.osBtn:Show(); f.tmBtn:Show(); f.passBtn:Show()
     f.bisBtn:SetScript("OnClick", function() self:ChooseInterest(roll, "bis") end)
     f.msBtn:SetScript("OnClick", function() self:ChooseInterest(roll, "ms") end)
-    f.sideBtn:SetScript("OnClick", function() self:ChooseInterest(roll, "side") end)
+    f.muBtn:SetScript("OnClick", function() self:ChooseInterest(roll, "mu") end)
     f.osBtn:SetScript("OnClick", function() self:ChooseInterest(roll, "os") end)
     f.tmBtn:SetScript("OnClick", function() self:ChooseInterest(roll, "tm") end)
     f.passBtn:SetScript("OnClick", function() self:ChooseInterest(roll, "pass") end)
@@ -336,10 +336,10 @@ function addon:ShowPendingPopup(item, slot)
     f.icon:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = link
     f.name:SetText(link)
-    f.sub:SetText("|cff88ccffPrio:|r " .. (self:GetLiveItemPrio(item) or "BiS > MS > SG > OS > TM"))
+    f.sub:SetText("|cff88ccffPrio:|r " .. (self:GetLiveItemPrio(item) or "BiS > MS > MU > OS > TM"))
     f.count:Hide()
 
-    f.bisBtn:Hide(); f.msBtn:Hide(); f.sideBtn:Hide(); f.osBtn:Hide(); f.tmBtn:Hide(); f.passBtn:Hide(); f.okBtn:Hide()
+    f.bisBtn:Hide(); f.msBtn:Hide(); f.muBtn:Hide(); f.osBtn:Hide(); f.tmBtn:Hide(); f.passBtn:Hide(); f.okBtn:Hide()
 
     f.cancelBtn:Show()
     f.cancelBtn:SetWidth(50)
@@ -401,7 +401,7 @@ function addon:ShowResultPopup(roll, winner, winnerRoll, sections, slot)
     end
     f.sub:SetText(line)
 
-    f.bisBtn:Hide(); f.msBtn:Hide(); f.sideBtn:Hide(); f.osBtn:Hide(); f.tmBtn:Hide(); f.passBtn:Hide(); f.rollBtn:Hide(); f.cancelBtn:Hide()
+    f.bisBtn:Hide(); f.msBtn:Hide(); f.muBtn:Hide(); f.osBtn:Hide(); f.tmBtn:Hide(); f.passBtn:Hide(); f.rollBtn:Hide(); f.cancelBtn:Hide()
     f.count:Hide()
     f.okBtn:Show()
     f.okBtn:SetScript("OnClick", function() closePopup(self, f); compactPopups(self) end)
@@ -457,7 +457,7 @@ end
 
 function addon:GetLiveItemPrio(item)
     local rule = item and item.name and self:GetLootRule(item.name)
-    return (rule and rule.raw) or "BiS > MS > SG > OS > TM"   -- default: bracket order
+    return (rule and rule.raw) or "BiS > MS > MU > OS > TM"   -- default: bracket order
 end
 
 function addon:HasOpenRollForLink(link)
@@ -690,13 +690,13 @@ end
 function addon:BuildPrioSections(item, registrants)
     -- Ordered priority sections. Winner = highest roll in the first non-empty section.
     --   1. Named loot: a named player wins in ALL cases, so their tiers come first.
-    --   2. BiS > MS > SG buckets: the item's spec/class loot rule is applied WITHIN each.
+    --   2. BiS > MS > MU buckets: the item's spec/class loot rule is applied WITHIN each.
     --   3. OS > TM buckets: flat (no spec priority).
     -- Pass declines (no bucket). Each roller appears in exactly one section.
     local lootRule  = item and item.name and self:GetLootRule(item.name)
     local namedRule = item and item.name and self:GetNamedRule(item.name)
 
-    local buckets = { bis = {}, ms = {}, side = {}, os = {}, tm = {} }
+    local buckets = { bis = {}, ms = {}, mu = {}, os = {}, tm = {} }
     for _, r in ipairs(registrants) do
         if buckets[r.tier] then
             local list = buckets[r.tier]
@@ -741,8 +741,8 @@ function addon:BuildPrioSections(item, registrants)
         end
     end
 
-    -- 2. BiS / MS / SG: apply the loot rule's spec/class tiers within the bucket.
-    for _, bk in ipairs({ "bis", "ms", "side" }) do
+    -- 2. BiS / MS / MU: apply the loot rule's spec/class tiers within the bucket.
+    for _, bk in ipairs({ "bis", "ms", "mu" }) do
         local cands = buckets[bk]
         if lootRule and lootRule.tiers and #lootRule.tiers > 0 and #cands > 0 then
             local remaining = {}
