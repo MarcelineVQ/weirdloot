@@ -19,6 +19,10 @@ local function buildSessionState(ownerKey)
         results = {},
         lockedItems = {},
         pendingLinks = {},
+        lootWindowHints = {},
+        lootWindowItems = {},
+        pendingHintedRolls = {},
+        recentAddedLinks = {},
         attendees = {},
     }
 end
@@ -108,6 +112,29 @@ function addon:InitializeSession()
     self.session.ownerKey = ownerKey
     self.session.lockedItems = self.session.lockedItems or {}
     self.session.pendingLinks = self.session.pendingLinks or {}
+    self.session.lootWindowHints = self.session.lootWindowHints or {}
+    self.session.lootWindowItems = self.session.lootWindowItems or {}
+    self.session.pendingHintedRolls = self.session.pendingHintedRolls or {}
+    self.session.recentAddedLinks = self.session.recentAddedLinks or {}
+end
+
+function addon:HintLootWindowItem(link, count, name, icon)
+    if not self.session or not self.session.active then
+        return
+    end
+    if not link or link == "" then
+        return
+    end
+
+    self.session.lootWindowHints = self.session.lootWindowHints or {}
+    self.session.lootWindowHints[link] = (self.session.lootWindowHints[link] or 0) + (count or 1)
+    self.session.lootWindowItems = self.session.lootWindowItems or {}
+    self.session.lootWindowItems[link] = {
+        name = name or link,
+        icon = icon or "Interface\\Icons\\INV_Misc_QuestionMark",
+    }
+    self.session.pendingHintedRolls = self.session.pendingHintedRolls or {}
+    self.session.pendingHintedRolls[link] = true
 end
 
 function addon:BuildBagSnapshot()
@@ -223,6 +250,10 @@ function addon:StartLootSession()
     self.session.results = {}
     self.session.lockedItems = {}
     self.session.pendingLinks = {}
+    self.session.lootWindowHints = {}
+    self.session.lootWindowItems = {}
+    self.session.pendingHintedRolls = {}
+    self.session.recentAddedLinks = {}
     self.session.attendees = util:CloneTable(self:GetAttendees())
 
     self.sessionDb.history = self.sessionDb.history or {}
@@ -248,6 +279,10 @@ function addon:ClearSession()
     self.session.results = {}
     self.session.lockedItems = {}
     self.session.pendingLinks = {}
+    self.session.lootWindowHints = {}
+    self.session.lootWindowItems = {}
+    self.session.pendingHintedRolls = {}
+    self.session.recentAddedLinks = {}
     self:TriggerCallback("SESSION_UPDATED")
 end
 
@@ -272,16 +307,29 @@ function addon:BuildSessionItemList(includeAllEpics)
     end
 
     local tradeableCounts = self:BuildTradeableEpicCounts()
+    local hintedCounts = session.lootWindowHints or {}
+    local hintedItems = session.lootWindowItems or {}
+    local recentAddedLinks = session.recentAddedLinks or {}
+    local allLinks = {}
     local sortedLinks = {}
-    for link, totalCount in pairs(currentSnapshot) do
-        local eligibleCount = tradeableCounts[link] or 0
+    for link in pairs(currentSnapshot) do
+        allLinks[link] = true
+    end
+    for link in pairs(hintedCounts) do
+        allLinks[link] = true
+    end
+
+    for link in pairs(allLinks) do
+        local totalCount = math.max(currentSnapshot[link] or 0, hintedCounts[link] or 0)
+        local eligibleCount = math.max(tradeableCounts[link] or 0, hintedCounts[link] or 0, recentAddedLinks[link] and totalCount or 0)
         if eligibleCount > 0 then
             local itemName, _, quality, _, _, _, _, _, _, texture = GetItemInfo(link)
+            local hintedItem = hintedItems[link] or {}
             sortedLinks[#sortedLinks + 1] = {
                 link = link,
                 count = math.min(totalCount, eligibleCount),
-                name = itemName or link,
-                icon = texture or "Interface\\Icons\\INV_Misc_QuestionMark",
+                name = itemName or hintedItem.name or link,
+                icon = texture or hintedItem.icon or "Interface\\Icons\\INV_Misc_QuestionMark",
             }
         end
     end
@@ -372,6 +420,11 @@ function addon:OnBagUpdate()
         end
     end
 
+    session.recentAddedLinks = {}
+    for link in pairs(added) do
+        session.recentAddedLinks[link] = true
+    end
+
     session.currentSnapshot = currentSnapshot
     if not anyAdded then
         return false
@@ -384,6 +437,7 @@ function addon:OnBagUpdate()
     end
 
     -- newly-arrived loot auto-starts a live roll (loot-master only, gated inside)
+    self:AutoRollHintedItems()
     self:AutoRollAddedItems(added)
     return true
 end

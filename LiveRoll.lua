@@ -675,6 +675,22 @@ function addon:AutoRollAddedItems(addedLinks)
     end
 end
 
+function addon:AutoRollHintedItems()
+    if not self.db.autoRoll then return end
+    if not self:IsAuthorizedLootMaster() then return end
+
+    local pendingHintedRolls = self.session.pendingHintedRolls or {}
+    for _, item in ipairs(self.session.items or {}) do
+        if pendingHintedRolls[item.link] then
+            if item.id then self:UnlockItem(item.id) end
+            if not self:HasOpenPendingForLink(item.link) and not self:HasOpenRollForLink(item.link) then
+                self:ShowPendingPopup(item)
+            end
+            pendingHintedRolls[item.link] = nil
+        end
+    end
+end
+
 -- After a reload, re-show the pending popups for any items the ML hadn't decided on yet
 -- (Start/Skip). Skipped or rolled items aren't in pendingLinks, so they stay gone.
 function addon:RestorePendingPopups()
