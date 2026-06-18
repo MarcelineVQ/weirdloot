@@ -177,24 +177,10 @@ function addon:BuildBagSnapshot()
 end
 
 function addon:BuildManualScanCounts()
-    local counts = {}
-    local minQuality = (self.db and self.db.testMode) and 0 or 4
-
-    for bag = 0, MAX_BAG_ID do
-        local slots = GetContainerNumSlots(bag) or 0
-        for slot = 1, slots do
-            local link = GetContainerItemLink(bag, slot)
-            local count, quality = getBagItemCountAndQuality(bag, slot, link)
-            local itemName = getItemNameFromLink(link)
-            local isKnownLoot = itemName and self:GetItemInfoEntry(itemName)
-
-            if link and count > 0 and ((quality and quality >= minQuality) or isKnownLoot) then
-                counts[link] = (counts[link] or 0) + count
-            end
-        end
-    end
-
-    return counts
+    -- Manual Scan Bags should still only surface loot the master can actually hand out.
+    -- Now that quality is derived reliably from the link colour, the tradeable scan can
+    -- correctly pick up tier tokens without also leaking in permanently non-tradable loot.
+    return self:BuildTradeableEpicCounts()
 end
 
 function addon:HasAddedEpicLoot(currentSnapshot)
