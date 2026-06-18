@@ -860,7 +860,7 @@ function addon:BuildLootTab()
     headerRollers:SetScript("OnClick", function() end)
     panel.headerRollers = headerRollers
 
-    local list = createScrollList(panel, "WeirdLootLootList", 20, function(row)
+    local list = createScrollList(panel, "WeirdLootLootList", 19, function(row)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
         row.icon = row:CreateTexture(nil, "ARTWORK")
