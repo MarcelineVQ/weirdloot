@@ -28,27 +28,18 @@ function addon:InitializeLiveRoll()
         local relativePoint = (popupPos and popupPos.relativePoint) or "TOP"
         local x = (popupPos and popupPos.x) or 260
         local y = (popupPos and popupPos.y) or -170
+        -- Pure invisible positioning reference for the popup stack. It is intentionally NOT
+        -- mouse-interactive: an always-shown EnableMouse frame would capture clicks over its
+        -- rect even when no popups are visible. Dragging is driven by the popups, which call
+        -- anchor:StartMoving() (that only needs SetMovable, not EnableMouse) and persist the
+        -- position on their own OnDragStop.
         local anchor = CreateFrame("Frame", nil, UIParent)
         anchor:SetWidth(340)
         anchor:SetHeight(94)
         anchor:SetFrameStrata("DIALOG")
-        anchor:EnableMouse(true)
         anchor:SetMovable(true)
         anchor:SetClampedToScreen(true)
-        anchor:RegisterForDrag("LeftButton")
         anchor:SetPoint(point, UIParent, relativePoint, x, y)
-        anchor:SetScript("OnDragStart", function(frame)
-            frame:StartMoving()
-        end)
-        anchor:SetScript("OnDragStop", function(frame)
-            frame:StopMovingOrSizing()
-            local anchorPoint, _, anchorRelativePoint, pointX, pointY = frame:GetPoint()
-            self.db.ui.liveRollPopups = self.db.ui.liveRollPopups or {}
-            self.db.ui.liveRollPopups.point = anchorPoint or "TOP"
-            self.db.ui.liveRollPopups.relativePoint = anchorRelativePoint or anchorPoint or "TOP"
-            self.db.ui.liveRollPopups.x = pointX or 260
-            self.db.ui.liveRollPopups.y = pointY or -170
-        end)
         self.live.anchor = anchor
     end
 end
