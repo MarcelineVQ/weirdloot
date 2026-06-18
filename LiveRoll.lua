@@ -16,7 +16,41 @@ local util = addon.util
 -- ML drives its own popups locally and members react to DROP/WIN over comms.
 
 function addon:InitializeLiveRoll()
-    self.live = { rolls = {}, seq = 0, pool = {}, active = {} }
+    self.live = self.live or { rolls = {}, seq = 0, pool = {}, active = {} }
+    self.live.rolls = self.live.rolls or {}
+    self.live.seq = self.live.seq or 0
+    self.live.pool = self.live.pool or {}
+    self.live.active = self.live.active or {}
+
+    if not self.live.anchor then
+        local popupPos = self.db and self.db.ui and self.db.ui.liveRollPopups or nil
+        local point = (popupPos and popupPos.point) or "TOP"
+        local relativePoint = (popupPos and popupPos.relativePoint) or "TOP"
+        local x = (popupPos and popupPos.x) or 260
+        local y = (popupPos and popupPos.y) or -170
+        local anchor = CreateFrame("Frame", nil, UIParent)
+        anchor:SetWidth(340)
+        anchor:SetHeight(94)
+        anchor:SetFrameStrata("DIALOG")
+        anchor:EnableMouse(true)
+        anchor:SetMovable(true)
+        anchor:SetClampedToScreen(true)
+        anchor:RegisterForDrag("LeftButton")
+        anchor:SetPoint(point, UIParent, relativePoint, x, y)
+        anchor:SetScript("OnDragStart", function(frame)
+            frame:StartMoving()
+        end)
+        anchor:SetScript("OnDragStop", function(frame)
+            frame:StopMovingOrSizing()
+            local anchorPoint, _, anchorRelativePoint, pointX, pointY = frame:GetPoint()
+            self.db.ui.liveRollPopups = self.db.ui.liveRollPopups or {}
+            self.db.ui.liveRollPopups.point = anchorPoint or "TOP"
+            self.db.ui.liveRollPopups.relativePoint = anchorRelativePoint or anchorPoint or "TOP"
+            self.db.ui.liveRollPopups.x = pointX or 260
+            self.db.ui.liveRollPopups.y = pointY or -170
+        end)
+        self.live.anchor = anchor
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -24,6 +58,7 @@ end
 -- ---------------------------------------------------------------------------
 local POPUP_W, POPUP_H = 340, 94
 local ROLL_DURATION = 20        -- seconds raiders have to roll before it auto-resolves
+local popupBasePoint, savePopupBasePoint, layoutPopups
 
 local function makeButton(parent, text, width)
     local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
@@ -60,6 +95,105 @@ local function resetInterestButtons(f)
         end
     end
 end
+
+local function formatLootRuleEntry(entry)
+    if not entry then
+        return ""
+    end
+    if entry.isRest then
+        return "Rest"
+    end
+
+    local colorCode = util:GetClassColorCode(entry.className) or "|cffffffff"
+    local label = ""
+    if entry.specName and entry.specName ~= "" then
+        label = util:TitleCaseWords(entry.specName)
+    elseif entry.className and entry.className ~= "" then
+        label = util:TitleCaseWords(entry.className)
+    else
+        label = util:TitleCaseWords(entry.raw or "")
+    end
+
+    return colorCode .. label .. "|r"
+end
+
+local function formatLootRuleDisplay(rule)
+    if not rule or not rule.tiers then
+        return nil
+    end
+
+    local tiers = {}
+    for _, tier in ipairs(rule.tiers) do
+        local entries = {}
+        for _, entry in ipairs(tier.entries or {}) do
+            local formatted = formatLootRuleEntry(entry)
+            if formatted ~= "" then
+                entries[#entries + 1] = formatted
+            end
+        end
+        if #entries > 0 then
+            tiers[#tiers + 1] = table.concat(entries, " / ")
+        end
+    end
+
+    if #tiers == 0 then
+        return nil
+    end
+
+    return table.concat(tiers, " > ")
+end
+
+local function formatNamedRuleEntry(entry)
+    if not entry then
+        return ""
+    end
+    if entry.isLootCouncil then
+        return "LC"
+    end
+    if entry.isRest then
+        return "Rest"
+    end
+
+    local playerName = entry.raw or ""
+    local profile = addon.GetRosterProfile and addon:GetRosterProfile(playerName) or nil
+    local classColor = util:GetClassColorCode(profile and profile.className) or "|cffffffff"
+    return classColor .. util:TitleCaseWords(playerName) .. "|r"
+end
+
+local function formatNamedRuleDisplay(rule)
+    if not rule or not rule.tiers then
+        return nil
+    end
+
+    local tiers = {}
+    local hasLootCouncil = false
+    for _, tier in ipairs(rule.tiers) do
+        local entries = {}
+        for _, entry in ipairs(tier.entries or {}) do
+            if entry.isLootCouncil then
+                hasLootCouncil = true
+            end
+            local formatted = formatNamedRuleEntry(entry)
+            if formatted ~= "" and not entry.isLootCouncil then
+                entries[#entries + 1] = formatted
+            end
+        end
+        if #entries > 0 then
+            tiers[#tiers + 1] = table.concat(entries, " / ")
+        end
+    end
+
+    if hasLootCouncil then
+        tiers[#tiers + 1] = "LC"
+    end
+
+    if #tiers == 0 then
+        return nil
+    end
+
+    return table.concat(tiers, " > ")
+end
+
 local function highlightInterestButton(f, tier)
     for key, btn in pairs(interestButtons(f)) do
         if btn then
@@ -72,17 +206,31 @@ local function highlightInterestButton(f, tier)
 end
 
 local function makePopup()
-    local f = CreateFrame("Frame", nil, UIParent)
+    local parent = (addon.live and addon.live.anchor) or UIParent
+    local f = CreateFrame("Frame", nil, parent)
     f:SetWidth(POPUP_W)
     f:SetHeight(POPUP_H)
     f:SetFrameStrata("DIALOG")
     f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
     f:SetBackdrop({
         bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
         edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
         tile = true, tileSize = 16, edgeSize = 16,
         insets = { left = 4, right = 4, top = 4, bottom = 4 },
     })
+    f:SetScript("OnDragStart", function()
+        if addon.live and addon.live.anchor then
+            addon.live.anchor:StartMoving()
+        end
+    end)
+    f:SetScript("OnDragStop", function()
+        if addon.live and addon.live.anchor then
+            addon.live.anchor:StopMovingOrSizing()
+            local point, _, relativePoint, x, y = addon.live.anchor:GetPoint()
+            savePopupBasePoint(addon, point, relativePoint, x, y)
+        end
+    end)
 
     f.icon = f:CreateTexture(nil, "ARTWORK")
     f.icon:SetWidth(32)
@@ -153,18 +301,37 @@ end
 local function acquirePopup(self)
     local f = table.remove(self.live.pool)
     if not f then f = makePopup() end
+    f.ownerAddon = self
     return f
+end
+
+popupBasePoint = function(self)
+    if self.live and self.live.anchor then
+        local point, _, relativePoint, x, y = self.live.anchor:GetPoint()
+        return point or "TOP", relativePoint or point or "TOP", x or 260, y or -170
+    end
+    local ui = self.db and self.db.ui
+    local pos = ui and ui.liveRollPopups
+    return (pos and pos.point) or "TOP", (pos and pos.relativePoint) or (pos and pos.point) or "TOP", (pos and pos.x) or 260, (pos and pos.y) or -170
+end
+
+savePopupBasePoint = function(self, point, relativePoint, x, y)
+    self.db.ui.liveRollPopups = self.db.ui.liveRollPopups or {}
+    self.db.ui.liveRollPopups.point = point or "TOP"
+    self.db.ui.liveRollPopups.relativePoint = relativePoint or point or "TOP"
+    self.db.ui.liveRollPopups.x = x
+    self.db.ui.liveRollPopups.y = y
 end
 
 -- Each popup keeps a fixed screen slot for its whole lifetime, so when one resolves or
 -- its timer expires the others DON'T slide up to fill the gap (that shifting was
 -- confusing). A closing popup frees its slot; the next new popup reuses the lowest free
 -- one.
-local function layoutPopups(self)
+layoutPopups = function(self)
     for _, f in ipairs(self.live.active) do
         local slot = f.slot or 0
         f:ClearAllPoints()
-        f:SetPoint("TOP", UIParent, "TOP", 260, -170 - slot * (POPUP_H + 8))
+        f:SetPoint("TOP", self.live.anchor or UIParent, "TOP", 0, -slot * (POPUP_H + 8))
     end
 end
 
@@ -223,7 +390,7 @@ function addon:ShowInterestPopup(roll)
     f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = roll.link
     f.name:SetText(roll.link ~= "" and roll.link or roll.name or "Item")
-    f.sub:SetText("|cff88ccffPrio:|r " .. ((roll.prio and roll.prio ~= "") and roll.prio or "BiS > MS > MU > OS > TM"))
+    f.sub:SetText("|cffffffffPrio:|r " .. ((roll.prio and roll.prio ~= "") and roll.prio or "BiS > MS > MU > OS > TM"))
     f.okBtn:Hide()
 
     f.bisBtn:Show(); f.msBtn:Show(); f.muBtn:Show(); f.osBtn:Show(); f.tmBtn:Show(); f.passBtn:Show()
@@ -334,7 +501,7 @@ function addon:ShowPendingPopup(item, slot)
     f.icon:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = link
     f.name:SetText(link)
-    f.sub:SetText("|cff88ccffPrio:|r " .. (self:GetLiveItemPrio(item) or "BiS > MS > MU > OS > TM"))
+    f.sub:SetText("|cffffffffPrio:|r " .. (self:GetLiveItemPrio(item) or "BiS > MS > MU > OS > TM"))
     f.count:Hide()
 
     f.bisBtn:Hide(); f.msBtn:Hide(); f.muBtn:Hide(); f.osBtn:Hide(); f.tmBtn:Hide(); f.passBtn:Hide(); f.okBtn:Hide()
@@ -454,8 +621,21 @@ local function nextRollId(self)
 end
 
 function addon:GetLiveItemPrio(item)
-    local rule = item and item.name and self:GetLootRule(item.name)
-    return (rule and rule.raw) or "BiS > MS > MU > OS > TM"   -- default: bracket order
+    local itemName = item and item.name
+    local namedRule = itemName and self:GetNamedRule(itemName)
+    if namedRule and namedRule.raw and namedRule.raw ~= "" then
+        local prioText = formatNamedRuleDisplay(namedRule)
+        if not prioText or prioText == "" then
+            prioText = namedRule.raw
+            if self:RuleHasLootCouncil(namedRule) and not string.match(prioText, ">%s*[Ll][Cc]%s*$") then
+                prioText = prioText .. " > LC"
+            end
+        end
+        return prioText
+    end
+
+    local lootRule = itemName and self:GetLootRule(itemName)
+    return formatLootRuleDisplay(lootRule) or "BiS > MS > MU > OS > TM"   -- default: bracket order
 end
 
 function addon:HasOpenRollForLink(link)
@@ -491,6 +671,22 @@ function addon:AutoRollAddedItems(addedLinks)
             if not self:HasOpenPendingForLink(item.link) and not self:HasOpenRollForLink(item.link) then
                 self:ShowPendingPopup(item)
             end
+        end
+    end
+end
+
+function addon:AutoRollHintedItems()
+    if not self.db.autoRoll then return end
+    if not self:IsAuthorizedLootMaster() then return end
+
+    local pendingHintedRolls = self.session.pendingHintedRolls or {}
+    for _, item in ipairs(self.session.items or {}) do
+        if pendingHintedRolls[item.link] then
+            if item.id then self:UnlockItem(item.id) end
+            if not self:HasOpenPendingForLink(item.link) and not self:HasOpenRollForLink(item.link) then
+                self:ShowPendingPopup(item)
+            end
+            pendingHintedRolls[item.link] = nil
         end
     end
 end

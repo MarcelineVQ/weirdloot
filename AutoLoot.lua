@@ -74,7 +74,8 @@ function addon:LOOT_OPENED()
 
     for slot = 1, GetNumLootItems() do
         if LootSlotIsItem(slot) then
-            local _, _, _, quality = GetLootSlotInfo(slot)
+            local texture, itemName, _, quality = GetLootSlotInfo(slot)
+            local link = GetLootSlotLink and GetLootSlotLink(slot) or nil
             local bind = self:LootSlotBindType(slot)
             local target
             if bind == "bop" then
@@ -83,6 +84,9 @@ function addon:LOOT_OPENED()
                 target = ((quality or 0) >= 4) and selfIdx or deerIdx  -- epic BoE -> ML; else DE'er
             end
             if target then
+                if target == selfIdx and link and link ~= "" then
+                    self:HintLootWindowItem(link, 1, itemName, texture)
+                end
                 GiveMasterLoot(slot, target)
             end
         end

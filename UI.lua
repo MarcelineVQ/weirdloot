@@ -1299,7 +1299,7 @@ function addon:BuildMasterTab()
     end)
 
     local exportWinnersButton = createButton(panel, "Export Winners", 110, 24)
-    exportWinnersButton:SetPoint("LEFT", unlockButton, "RIGHT", 8, 0)
+    exportWinnersButton:SetPoint("TOPLEFT", startButton, "BOTTOMLEFT", 0, -8)
     exportWinnersButton:SetScript("OnClick", function()
         addon:ExportWinners()
     end)
@@ -1311,7 +1311,7 @@ function addon:BuildMasterTab()
     end)
 
     local payoutButton = createButton(panel, "Start Payout", 120, 24)
-    payoutButton:SetPoint("LEFT", exportLogButton, "RIGHT", 8, 0)
+    payoutButton:SetPoint("LEFT", unlockButton, "RIGHT", 8, 0)
     payoutButton:SetScript("OnClick", function()
         addon:TogglePayout()
     end)
@@ -1330,9 +1330,19 @@ function addon:BuildMasterTab()
         .. "and their owed items auto-fill into the trade window (you click Trade to send). Trades from non-winners "
         .. "are declined while loot is still owed. Pause keeps the owed list but stops auto-fill.")
 
-    panel.summary = createLabel(panel, "", "TOPLEFT", startButton, "BOTTOMLEFT", 0, -24)
+    panel.controlsTitle = createLabel(panel, "Controls", "TOPLEFT", exportWinnersButton, "BOTTOMLEFT", 0, -24)
+    panel.controlsTitle:SetFontObject(GameFontHighlightLarge)
+
+    panel.summary = createLabel(panel, "", "TOPLEFT", panel.controlsTitle, "BOTTOMLEFT", 0, -8)
     panel.summary:SetWidth(900)
     panel.summary:SetJustifyV("TOP")
+
+    panel.snapshotTitle = createLabel(panel, "Session Snapshot", "TOPLEFT", panel.summary, "BOTTOMLEFT", 0, -20)
+    panel.snapshotTitle:SetFontObject(GameFontHighlightLarge)
+
+    panel.snapshot = createLabel(panel, "", "TOPLEFT", panel.snapshotTitle, "BOTTOMLEFT", 0, -8)
+    panel.snapshot:SetWidth(900)
+    panel.snapshot:SetJustifyV("TOP")
 
     self.ui.masterPanel = panel
 end
@@ -1585,8 +1595,19 @@ function addon:RefreshMasterTab()
             lockedCount = lockedCount + 1
         end
     end
-    panel.summary:SetText(string.format(
-        "Controls:\nStart Session establishes the active loot session.\nScan Bags pulls current epic items from the loot master's bags.\nBroadcast syncs items and current roll state to the raid.\nRoll Out the Loot resolves winners, records results, and locks each item after its first rollout.\nUnlock Roll clears the rollout lock for the entire session so everything can be rerolled intentionally.\n\nSession snapshot:\nConfig revision: %d\nRaid attendees: %d\nSession items: %d\nLocked items: %d\nProcessed results: %d",
+    panel.summary:SetText(table.concat({
+        "Start Session: Establishes the active loot session.",
+        "Scan Bags: Searches bags for current epic items from the loot master's bags.",
+        "Broadcast: Manually syncs items and current roll status to the raid.",
+        "Roll Out the Loot: Resolves winners, records results, and enables the safety lock.",
+        "Unlock Roll: Clears the rollout lock so the current session's loot can be rerolled intentionally.",
+        "Pause Payout: Toggles payout mode so owed winners can trade for auto-filled loot, or pauses that flow without clearing the ledger.",
+        "Export Winners: Opens a simple item-to-winner export list for sharing or cleanup.",
+        "Export Log: Opens the detailed loot-resolution audit log for review or record keeping.",
+    }, "\n"))
+
+    panel.snapshot:SetText(string.format(
+        "Config revision: %d\nRaid attendees: %d\nSession items: %d\nLocked items: %d\nProcessed results: %d",
         self.config.revision or 0,
         attendeeCount,
         itemCount,

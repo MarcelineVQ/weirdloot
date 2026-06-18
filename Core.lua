@@ -381,6 +381,12 @@ function addon:PLAYER_LOGIN()
             selectedTab = "loot",
             lootSortMode = "name",
             lootUsabilitySort = false,
+            liveRollPopups = {
+                point = "TOP",
+                relativePoint = "TOP",
+                x = 260,
+                y = -170,
+            },
             frame = {
                 x = 0,
                 y = 0,
