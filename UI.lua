@@ -295,7 +295,8 @@ local function createBackdropFrame(name, parent)
     return frame
 end
 
-local function createExportWindow(name, width, height, titleText)
+local function createTextWindow(name, width, height, titleText, options)
+    options = options or {}
     local frame = createBackdropFrame(name, UIParent)
     frame:SetWidth(width)
     frame:SetHeight(height)
@@ -320,7 +321,7 @@ local function createExportWindow(name, width, height, titleText)
 
     local scroll = CreateFrame("ScrollFrame", name .. "Scroll", frame, "UIPanelScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", 12, -42)
-    scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -34, 12)
+    scroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -34, options.showSaveButton and 44 or 12)
 
     local editBox = CreateFrame("EditBox", name .. "EditBox", scroll)
     editBox:SetMultiLine(true)
@@ -329,18 +330,38 @@ local function createExportWindow(name, width, height, titleText)
     editBox:SetHeight(height - 72)
     editBox:SetAutoFocus(false)
     editBox:EnableMouse(true)
+    editBox:SetTextInsets(4, 4, 4, 4)
     editBox:SetScript("OnEscapePressed", function()
         editBox:ClearFocus()
         frame:Hide()
     end)
     editBox:SetScript("OnEditFocusGained", function()
-        editBox:HighlightText()
+        if options.highlightOnFocus then
+            editBox:HighlightText()
+        end
     end)
+    if options.readOnly then
+        editBox:SetScript("OnTextChanged", function(selfBox)
+            selfBox:HighlightText()
+        end)
+    end
     scroll:SetScrollChild(editBox)
+
+    local saveButton
+    if options.showSaveButton then
+        saveButton = createButton(frame, options.saveButtonText or "Save", 90, 22)
+        saveButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -14, 12)
+        saveButton:SetScript("OnClick", function()
+            if options.onSave then
+                options.onSave(editBox:GetText() or "", frame)
+            end
+        end)
+    end
 
     frame.title = title
     frame.scroll = scroll
     frame.editBox = editBox
+    frame.saveButton = saveButton
     return frame
 end
 
@@ -696,7 +717,10 @@ function addon:ShowExportWindow(kind, titleText, bodyText)
 
     local window = self.ui.exportWindows[kind]
     if not window then
-        window = createExportWindow("WeirdLoot" .. kind .. "ExportWindow", 720, 520, titleText)
+        window = createTextWindow("WeirdLoot" .. kind .. "ExportWindow", 720, 520, titleText, {
+            readOnly = true,
+            highlightOnFocus = true,
+        })
         self.ui.exportWindows[kind] = window
     end
 
@@ -704,6 +728,34 @@ function addon:ShowExportWindow(kind, titleText, bodyText)
     window.editBox:SetText(bodyText or "")
     window.editBox:SetFocus()
     window.editBox:HighlightText()
+    window.scroll:SetVerticalScroll(0)
+    window:Show()
+end
+
+function addon:ShowImportWindow(kind, titleText, bodyText, onSave)
+    self.ui = self.ui or {}
+    self.ui.importWindows = self.ui.importWindows or {}
+
+    local window = self.ui.importWindows[kind]
+    if not window then
+        window = createTextWindow("WeirdLoot" .. kind .. "ImportWindow", 720, 520, titleText, {
+            showSaveButton = true,
+            saveButtonText = "Save Import",
+        })
+        self.ui.importWindows[kind] = window
+    end
+
+    window.saveButton:SetScript("OnClick", function()
+        if onSave then
+            onSave(window.editBox:GetText() or "")
+        end
+        window.editBox:ClearFocus()
+        window:Hide()
+    end)
+
+    window.title:SetText(titleText or "")
+    window.editBox:SetText(bodyText or "")
+    window.editBox:SetFocus()
     window.scroll:SetVerticalScroll(0)
     window:Show()
 end
@@ -724,6 +776,28 @@ function addon:ExportLog()
     end
 
     self:ShowExportWindow("Log", "Export Log", self:BuildDetailedExportLogText())
+end
+
+function addon:ImportRoster()
+    if not self:IsAuthorizedLootMaster() then
+        self:Print("Only the loot master can import the roster.")
+        return
+    end
+
+    self:ShowImportWindow("Roster", "Import Roster", self.config.rosterImportText or "", function(text)
+        addon:SaveImports(text, addon.config.lootPriorityText, addon.config.namedItemsText)
+    end)
+end
+
+function addon:ImportNamedItems()
+    if not self:IsAuthorizedLootMaster() then
+        self:Print("Only the loot master can import named items.")
+        return
+    end
+
+    self:ShowImportWindow("NamedItems", "Import Named Items", self.config.namedItemsText or "", function(text)
+        addon:SaveImports(addon.config.rosterImportText, addon.config.lootPriorityText, text)
+    end)
 end
 
 function addon:BuildLootTab()
@@ -1363,6 +1437,18 @@ function addon:BuildMasterTab()
         addon:ExportLog()
     end)
 
+    local importRosterButton = createButton(panel, "Import Roster", 110, 24)
+    importRosterButton:SetPoint("LEFT", exportLogButton, "RIGHT", 8, 0)
+    importRosterButton:SetScript("OnClick", function()
+        addon:ImportRoster()
+    end)
+
+    local importNamedItemsButton = createButton(panel, "Import Named Items", 130, 24)
+    importNamedItemsButton:SetPoint("LEFT", importRosterButton, "RIGHT", 8, 0)
+    importNamedItemsButton:SetScript("OnClick", function()
+        addon:ImportNamedItems()
+    end)
+
     local payoutButton = createButton(panel, "Start Payout", 120, 24)
     payoutButton:SetPoint("LEFT", unlockButton, "RIGHT", 8, 0)
     payoutButton:SetScript("OnClick", function()
@@ -1376,6 +1462,8 @@ function addon:BuildMasterTab()
     panel.unlockButton = unlockButton
     panel.exportWinnersButton = exportWinnersButton
     panel.exportLogButton = exportLogButton
+    panel.importRosterButton = importRosterButton
+    panel.importNamedItemsButton = importNamedItemsButton
     panel.payoutButton = payoutButton
 
     setButtonTooltip(payoutButton, "Payout Mode (toggle)",
@@ -1611,6 +1699,8 @@ function addon:RefreshMasterTab()
         panel.processButton:Enable()
         panel.exportWinnersButton:Enable()
         panel.exportLogButton:Enable()
+        panel.importRosterButton:Enable()
+        panel.importNamedItemsButton:Enable()
         panel.payoutButton:Enable()
     else
         panel.startButton:Disable()
@@ -1619,6 +1709,8 @@ function addon:RefreshMasterTab()
         panel.processButton:Disable()
         panel.exportWinnersButton:Disable()
         panel.exportLogButton:Disable()
+        panel.importRosterButton:Disable()
+        panel.importNamedItemsButton:Disable()
         panel.payoutButton:Disable()
     end
 
@@ -1657,6 +1749,8 @@ function addon:RefreshMasterTab()
         "Pause Payout: Toggles payout mode so owed winners can trade for auto-filled loot, or pauses that flow without clearing the ledger.",
         "Export Winners: Opens a simple item-to-winner export list for sharing or cleanup.",
         "Export Log: Opens the detailed loot-resolution audit log for review or record keeping.",
+        "Import Roster: Opens an editable import window where you can paste the current weekly roster list and save it to WeirdLoot.",
+        "Import Named Items: Opens an editable import window where you can paste the current named-item priority list and save it to WeirdLoot.",
     }, "\n"))
 
     panel.snapshot:SetText(string.format(
