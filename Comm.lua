@@ -1,38 +1,36 @@
 local addon = WeirdLoot
 local util = addon.util
 
-local MAX_PAYLOAD = 220
-
 function addon:InitializeComm()
     self.comm = {
-        incoming = {},
-        sequence = 0,
         autoSync = {
             lastSignature = nil,
             lastAt = 0,
         },
     }
+
+    -- AceComm-3.0 owns chunking + reassembly and paces every send through
+    -- ChatThrottleLib, so a full session broadcast can't trip the server's
+    -- addon-message flood limit. It registers its own CHAT_MSG_ADDON frame and
+    -- fires OnCommReceived with the fully-reassembled logical message.
+    local AceComm = LibStub and LibStub("AceComm-3.0", true)
+    if AceComm then
+        AceComm:Embed(self)
+        self:RegisterComm(self.prefix, "OnCommReceived")
+    else
+        self:Print("AceComm-3.0 not found; raid sync disabled.")
+    end
 end
 
-function addon:NextCommId()
-    self.comm.sequence = self.comm.sequence + 1
-    return tostring(time()) .. "-" .. tostring(self.comm.sequence)
-end
-
+-- One logical message per call. AceComm splits anything over ~254 bytes into
+-- ordered multipart chunks and throttles them; keep a single priority so the
+-- session burst (SESSION_BEGIN -> ATTENDEE -> ITEM ...) stays in sequence.
 function addon:SendLargeMessage(command, values, distribution, target)
+    if not self.SendCommMessage then
+        return
+    end
     local logical = command .. "|" .. util:JoinEncoded(values or {})
-    local messageId = self:NextCommId()
-    local total = math.ceil(string.len(logical) / MAX_PAYLOAD)
-    if total < 1 then
-        total = 1
-    end
-
-    for index = 1, total do
-        local startPos = ((index - 1) * MAX_PAYLOAD) + 1
-        local payload = string.sub(logical, startPos, startPos + MAX_PAYLOAD - 1)
-        local chunk = table.concat({ messageId, index, total, payload }, ":")
-        SendAddonMessage(self.prefix, chunk, distribution, target)
-    end
+    self:SendCommMessage(self.prefix, logical, distribution, target, "NORMAL")
 end
 
 function addon:BroadcastSession()
@@ -226,7 +224,10 @@ function addon:RequestSessionSync()
     self:Print("Requested session sync from loot master.")
 end
 
-function addon:CHAT_MSG_ADDON(prefix, message, distribution, sender)
+-- AceComm receive callback: prefix-filtered and already reassembled. We still
+-- never receive our own RAID/PARTY messages (the client drops them), but keep the
+-- self-skip defensively in case of a self-WHISPER echo.
+function addon:OnCommReceived(prefix, message, distribution, sender)
     if prefix ~= self.prefix then
         return
     end
@@ -235,37 +236,7 @@ function addon:CHAT_MSG_ADDON(prefix, message, distribution, sender)
         return
     end
 
-    local messageId, index, total, payload = string.match(message or "", "^(.-):(%d+):(%d+):(.*)$")
-    if not messageId then
-        return
-    end
-
-    local senderKey = util:NormalizeKey(sender or "unknown")
-    self.comm.incoming[senderKey] = self.comm.incoming[senderKey] or {}
-    local senderMessages = self.comm.incoming[senderKey]
-    senderMessages[messageId] = senderMessages[messageId] or {
-        total = tonumber(total),
-        parts = {},
-    }
-
-    local pending = senderMessages[messageId]
-    pending.parts[tonumber(index)] = payload
-
-    local complete = true
-    for partIndex = 1, pending.total do
-        if not pending.parts[partIndex] then
-            complete = false
-            break
-        end
-    end
-
-    if not complete then
-        return
-    end
-
-    local logical = table.concat(pending.parts, "")
-    senderMessages[messageId] = nil
-    self:HandleCommMessage(sender, logical)
+    self:HandleCommMessage(sender, message)
 end
 
 function addon:HandleCommMessage(sender, logical)
