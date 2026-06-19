@@ -201,6 +201,26 @@ local function positionInterestButtons(f, isOwner)
     end
 end
 
+local function isPlayerAllowedForRoll(self, roll, playerName)
+    local itemName = (roll and roll.name) or ""
+    return self:IsPlayerAllowedForItem(itemName, playerName)
+end
+
+local function applyInterestButtonAvailability(self, f, roll)
+    local playerName = util:GetPlayerName("player")
+    local allowed = isPlayerAllowedForRoll(self, roll, playerName)
+
+    for key, btn in pairs(interestButtons(f)) do
+        if key == "pass" then
+            btn:Enable()
+        elseif allowed then
+            btn:Enable()
+        else
+            btn:Disable()
+        end
+    end
+end
+
 local function formatLootRuleEntry(entry)
     if not entry then
         return ""
@@ -523,6 +543,7 @@ function addon:ShowInterestPopup(roll)
     f.passBtn:SetScript("OnClick", function() self:ChooseInterest(roll, "pass") end)
     resetInterestButtons(f)
     positionInterestButtons(f, roll.owner)
+    applyInterestButtonAvailability(self, f, roll)
 
     if roll.owner then
         -- the ML keeps the popup to drive the roll: Cancel aborts, Roll! resolves
@@ -575,12 +596,7 @@ function addon:RefreshInterestPopup(roll)
     if not f or f.mode ~= "interest" then return end
 
     if roll.owner and roll.itemId then
-        local total = 0
-        for _, choice in pairs(self.session.responses[roll.itemId] or {}) do
-            if self:IsResponseActive(choice) then
-                total = total + 1
-            end
-        end
+        local total = #(self:BuildRollerList(roll.itemId) or {})
         f.count:SetText(total > 0 and (total .. " rolling") or "")
         refreshPopupRollLines(self, roll)
         return
@@ -620,6 +636,11 @@ end
 -- is Pass for a non-ML roller, which dismisses the loot immediately; the ML never
 -- auto-hides (it keeps the popup to drive the roll).
 function addon:ChooseInterest(roll, tier)
+    local playerName = util:GetPlayerName("player")
+    if tier ~= "pass" and not isPlayerAllowedForRoll(self, roll, playerName) then
+        self:Print("Your class cannot use that token. You may only pass.")
+        tier = "pass"
+    end
     self:SendInterest(roll.id, tier)
     roll.choice = tier
 
@@ -646,7 +667,12 @@ function addon:ShowPendingPopup(item, slot)
     f.timer:Hide()
     f.pendingLink = link
     self.session.pendingLinks = self.session.pendingLinks or {}
-    self.session.pendingLinks[link] = true      -- persisted: re-shown to the ML after a reload
+    self.session.pendingLinks[link] = {
+        link = item.link,
+        name = item.name,
+        icon = item.icon,
+        quantity = item.quantity or 1,
+    }      -- persisted: re-shown to the ML after a reload
 
     f.icon:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = link
@@ -690,7 +716,7 @@ end
 -- ---------------------------------------------------------------------------
 -- result popup
 -- ---------------------------------------------------------------------------
-function addon:ShowResultPopup(roll, winner, winnerRoll, sections, slot)
+function addon:ShowResultPopup(roll, winnerDetails, sections, slot)
     local f = acquirePopup(self)
     f.mode = "result"
     f:SetScript("OnUpdate", nil)        -- no countdown on a result popup
@@ -706,25 +732,60 @@ function addon:ShowResultPopup(roll, winner, winnerRoll, sections, slot)
     setPopupHeight(f, POPUP_H)
 
     local myKey = util:NormalizeKey(util:GetPlayerName("player") or "")
-    local winKey = winner and winner ~= "" and util:NormalizeKey(winner) or nil
-    local myRoll, mySection, winnerSection
+    local myRoll, mySection
     for _, s in ipairs(sections or {}) do
         for _, m in ipairs(s.members) do
             local k = util:NormalizeKey(m.name)
             if k == myKey then myRoll = m.roll; mySection = s.label end
-            if winKey and k == winKey then winnerSection = s.label end
         end
     end
 
+    local winners = {}
+    local winnerKeys = {}
+    for _, winner in ipairs(winnerDetails or {}) do
+        local winnerKey = util:NormalizeKey(winner.name)
+        winnerKeys[winnerKey] = true
+        local winnerSection
+        for _, s in ipairs(sections or {}) do
+            for _, m in ipairs(s.members) do
+                if util:NormalizeKey(m.name) == winnerKey then
+                    winnerSection = s.label
+                    break
+                end
+            end
+            if winnerSection then break end
+        end
+        winners[#winners + 1] = {
+            name = winner.name,
+            roll = winner.roll,
+            section = winnerSection,
+            key = winnerKey,
+        }
+    end
+
+    local youWon = winnerKeys[myKey] == true
+
     local line
-    if not winKey then
+    if #winners == 0 then
         line = "No rollers."
-    elseif winKey == myKey then
-        line = string.format("|cff40ff40You won!|r  (your roll %s)", tostring(myRoll or winnerRoll))
+    elseif youWon then
+        if #winners > 1 then
+            local mine = myRoll and string.format("your roll %s", tostring(myRoll)) or "your roll"
+            line = string.format("|cff40ff40You won!|r  (%s)", mine)
+        else
+            line = string.format("|cff40ff40You won!|r  (your roll %s)", tostring(myRoll or winners[1].roll))
+        end
     else
         local mine = myRoll and string.format("Your roll %d%s.  ", myRoll, mySection and (" ("..mySection..")") or "") or ""
-        line = string.format("|cffff6060You lost.|r  %sWinner: %s (%s%s)", mine, winner,
-            tostring(winnerRoll), winnerSection and (", " .. winnerSection) or "")
+        local winnerParts = {}
+        for _, winner in ipairs(winners) do
+            winnerParts[#winnerParts + 1] = string.format("%s (%s%s)",
+                winner.name or "Unknown",
+                tostring(winner.roll or "-"),
+                winner.section and (", " .. winner.section) or "")
+        end
+        local winnerLabel = #winnerParts > 1 and "Winners" or "Winner"
+        line = string.format("|cffff6060You lost.|r  %s%s: %s", mine, winnerLabel, table.concat(winnerParts, "; "))
     end
     f.sub:SetText(line)
 
@@ -736,7 +797,7 @@ function addon:ShowResultPopup(roll, winner, winnerRoll, sections, slot)
     -- hover: full breakdown by priority section so a higher roll in a lower section is
     -- clearly explained
     f.sections = sections
-    f.winnerKey = winKey
+    f.winnerKeys = winnerKeys
     f.myKey = myKey
     f:SetScript("OnEnter", function(selfFrame)
         GameTooltip:SetOwner(selfFrame, "ANCHOR_RIGHT")
@@ -753,7 +814,7 @@ function addon:ShowResultPopup(roll, winner, winnerRoll, sections, slot)
                 for _, m in ipairs(mem) do
                     local key = util:NormalizeKey(m.name)
                     local isMe = selfFrame.myKey and key == selfFrame.myKey
-                    local won = selfFrame.winnerKey and key == selfFrame.winnerKey
+                    local won = selfFrame.winnerKeys and selfFrame.winnerKeys[key]
                     local label = isMe and "You" or m.name
                     if won then
                         label = "|cff40ff40" .. label .. "|r"            -- winner: green
@@ -823,15 +884,19 @@ function addon:AutoRollAddedItems(addedLinks)
     if not self.db.autoRoll then return end
     if not self:IsAuthorizedLootMaster() then return end
     for _, item in ipairs(self.session.items or {}) do
-        if addedLinks[item.link] then
-            -- A genuinely new copy just arrived in the bags. If a previous copy was rolled
-            -- out the item is locked; clear that so the duplicate can be rolled (the lock
-            -- only ever meant "the drop already handled was rolled out").
-            if item.id then self:UnlockItem(item.id) end
+        local addedCount = addedLinks[item.link]
+        if addedCount and addedCount > 0 then
             -- Dedup on the actual on-screen popup, NOT the persisted pendingLinks flag
             -- (which can be stale and would wrongly suppress a real new drop).
             if not self:HasOpenPendingForLink(item.link) and not self:HasOpenRollForLink(item.link) then
-                self:ShowPendingPopup(item)
+                local pendingItem = {
+                    id = item.id,
+                    link = item.link,
+                    name = item.name,
+                    icon = item.icon,
+                    quantity = addedCount,
+                }
+                self:ShowPendingPopup(pendingItem)
             end
         end
     end
@@ -850,7 +915,20 @@ function addon:RestorePendingPopups()
             for _, f in ipairs(self.live.active) do
                 if f.mode == "pending" and f.pendingLink == item.link then already = true break end
             end
-            if not already then self:ShowPendingPopup(item) end
+            if not already then
+                local pendingItem = pending[item.link]
+                if type(pendingItem) == "table" then
+                    self:ShowPendingPopup({
+                        id = item.id,
+                        link = item.link,
+                        name = pendingItem.name or item.name,
+                        icon = pendingItem.icon or item.icon,
+                        quantity = pendingItem.quantity or item.quantity or 1,
+                    })
+                else
+                    self:ShowPendingPopup(item)
+                end
+            end
         end
     end
 end
@@ -865,7 +943,7 @@ function addon:CancelLiveRoll(rollId)
     self:SendLargeMessage("CANCEL", { rollId }, "RAID")
     self.live.rolls[rollId] = nil
 
-    local item = { id = roll.itemId, link = roll.link, name = roll.name, icon = roll.icon }
+    local item = { id = roll.itemId, link = roll.link, name = roll.name, icon = roll.icon, quantity = roll.quantity or 1 }
     local slot = roll.popup and roll.popup.slot
     self:CloseInterestPopup(roll)
     self:ShowPendingPopup(item, slot)        -- back to pending in place, not gone
@@ -904,15 +982,14 @@ function addon:StartLiveRoll(item)
     }
 
     if item.id then
-        for playerKey, choice in pairs(self.session.responses[item.id] or {}) do
-            if self:IsResponseActive(choice) then
-                roll.registrants[playerKey] = {
-                    name = getPlayerDisplayName(self, playerKey),
-                    className = getPlayerClassName(self, playerKey),
-                    tier = choice,
-                    roll = nextLiveRollValue(),
-                }
-            end
+        for _, roller in ipairs(self:BuildRollerList(item.id) or {}) do
+            local playerKey = util:NormalizeKey(roller.name)
+            roll.registrants[playerKey] = {
+                name = roller.name,
+                className = roller.className or getPlayerClassName(self, playerKey),
+                tier = roller.responseType,
+                roll = nextLiveRollValue(),
+            }
         end
     end
 
@@ -953,17 +1030,11 @@ function addon:ResolveLiveRoll(rollId)
     end
     local record = self:ResolveSessionItem(item)
 
-    local winner = (record.winner and record.winner ~= "No winner") and record.winner or nil
-    local winnerRoll
-    for _, w in ipairs(record.winnerDetails or {}) do
-        if w.name == record.winner then winnerRoll = w.roll end
-    end
-
     -- adapt the record's roller breakdown into the popup's section format (grouped by bracket)
     local sections = self:SectionsFromResult(record)
 
     self:SendLargeMessage("WIN", {
-        rollId, roll.link, winner or "", "roll", tostring(winnerRoll or 0), self:EncodeSections(sections),
+        rollId, roll.link, self:EncodeWinnerDetails(record.winnerDetails), self:EncodeSections(sections),
     }, "RAID")
 
     -- finish: record + lock + broadcast, identical to the batch path
@@ -971,27 +1042,38 @@ function addon:ResolveLiveRoll(rollId)
     self.session.results = self.session.results or {}
     self.session.results[#self.session.results + 1] = record
     self:LockItem(item.id)
+    self:AddResolvedHeldItem(item.link, item.quantity or 1)
     self:BroadcastResults({ record })
     self:BroadcastSessionLocks()
     self:TriggerCallback("RESULTS_UPDATED")
 
     -- payout (skip when the ML won their own roll -- already in hand)
-    local selfWin = winner and util:NormalizeKey(winner) == util:NormalizeKey(util:GetPlayerName("player") or "")
-    if winner and self.payout and not selfWin then
+    local myKey = util:NormalizeKey(util:GetPlayerName("player") or "")
+    local selfWon = false
+    if self.payout then
         local itemId = tonumber(string.match(roll.link or "", "|Hitem:(%d+)"))
-        if itemId then self.payout:Owe(winner, itemId, 1, roll.link) end
+        if itemId then
+            for _, winner in ipairs(record.winnerDetails or {}) do
+                local winnerKey = util:NormalizeKey(winner.name)
+                if winnerKey == myKey then
+                    selfWon = true
+                elseif winner.name and winner.name ~= "" then
+                    self.payout:Owe(winner.name, itemId, 1, roll.link)
+                end
+            end
+        end
     end
 
     local slot = roll.popup and roll.popup.slot
     self:CloseInterestPopup(roll)
-    self:ShowResultPopup(roll, winner, winnerRoll, sections, slot)
+    self:ShowResultPopup(roll, record.winnerDetails or {}, sections, slot)
 
-    if not winner then
+    if #(record.winnerDetails or {}) == 0 then
         self:Print(roll.name .. " -> no rollers.")
-    elseif selfWin then
-        self:Print(string.format("%s -> %s (%s). You already hold it; not queued for payout.", roll.name, winner, tostring(winnerRoll)))
+    elseif selfWon then
+        self:Print(string.format("%s -> %s. You already hold one copy; other winners queued for payout as needed.", roll.name, record.winnersText or record.winner or "winner"))
     else
-        self:Print(string.format("%s -> %s (%s). Queued for payout.", roll.name, winner, tostring(winnerRoll)))
+        self:Print(string.format("%s -> %s. Queued for payout.", roll.name, record.winnersText or record.winner or "winner"))
     end
 end
 
@@ -1038,6 +1120,22 @@ function addon:EncodeSections(sections)
     return table.concat(secParts, ";")
 end
 
+function addon:EncodeWinnerDetails(winnerDetails)
+    local parts = {}
+    for _, winner in ipairs(winnerDetails or {}) do
+        parts[#parts + 1] = (winner.name or "") .. "=" .. tostring(winner.roll or 0)
+    end
+    return table.concat(parts, ",")
+end
+
+function addon:DecodeWinnerDetails(text)
+    local winners = {}
+    for name, value in string.gmatch(text or "", "([^=,]+)=([^,]+)") do
+        winners[#winners + 1] = { name = name, roll = tonumber(value) or 0 }
+    end
+    return winners
+end
+
 function addon:DecodeSections(text)
     local sections = {}
     for _, secText in ipairs(util:Split(text or "", ";")) do
@@ -1082,6 +1180,9 @@ end
 function addon:RegisterInterest(rollId, name, tier)
     local roll = self.live.rolls[rollId]
     if not roll or roll.resolved then return end
+    if tier ~= "pass" and not isPlayerAllowedForRoll(self, roll, name) then
+        tier = "pass"
+    end
     local playerKey = util:NormalizeKey(name)
     local existing = roll.registrants[playerKey] or {}
     local displayName = (name and name ~= "") and name or existing.name or getPlayerDisplayName(self, playerKey)
@@ -1153,7 +1254,7 @@ function addon:OnLiveSyncMessage(fields)
 end
 
 function addon:OnWinMessage(fields)
-    local rollId, link, winner, _, winnerRoll, sectionsText = fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]
+    local rollId, link, winnersText, sectionsText = fields[1], fields[2], fields[3], fields[4]
     local roll = self.live.rolls[rollId] or { id = rollId, link = link or "", name = link, icon = nil }
     roll.resolved = true
 
@@ -1161,9 +1262,10 @@ function addon:OnWinMessage(fields)
     -- a tier or were still deciding), convert it to a result popup they must OK to
     -- dismiss. If they already Passed (popup gone), leave it gone -- don't re-pop it.
     if roll.popup then
+        local winners = self:DecodeWinnerDetails(winnersText)
         local sections = self:DecodeSections(sectionsText)
         local slot = roll.popup.slot
         self:CloseInterestPopup(roll)
-        self:ShowResultPopup(roll, winner, tonumber(winnerRoll), sections, slot)
+        self:ShowResultPopup(roll, winners, sections, slot)
     end
 end

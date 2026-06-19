@@ -24,6 +24,7 @@ local function buildSessionState(ownerKey)
         nextItemSeq = 0,
         itemOrderByLink = {},
         nextItemOrder = 0,
+        resolvedHeldByLink = {},
     }
 end
 
@@ -164,6 +165,7 @@ function addon:InitializeSession()
     self.session.nextItemSeq = self.session.nextItemSeq or 0
     self.session.itemOrderByLink = self.session.itemOrderByLink or {}
     self.session.nextItemOrder = self.session.nextItemOrder or 0
+    self.session.resolvedHeldByLink = self.session.resolvedHeldByLink or {}
 end
 
 function addon:BuildBagSnapshot()
@@ -291,6 +293,7 @@ function addon:StartLootSession()
     self.session.nextItemSeq = 0
     self.session.itemOrderByLink = {}
     self.session.nextItemOrder = 0
+    self.session.resolvedHeldByLink = {}
 
     self.sessionDb.history = self.sessionDb.history or {}
 
@@ -319,6 +322,7 @@ function addon:ClearSession()
     self.session.nextItemSeq = 0
     self.session.itemOrderByLink = {}
     self.session.nextItemOrder = 0
+    self.session.resolvedHeldByLink = {}
     self:TriggerCallback("SESSION_UPDATED")
 end
 
@@ -346,6 +350,37 @@ function addon:AssignPickupOrder(currentSnapshot, tradeableCounts, includeAllEpi
     end
 end
 
+function addon:NextSessionItemId()
+    local session = self:GetCurrentSession()
+    session.nextItemSeq = (session.nextItemSeq or 0) + 1
+    return string.format("%s:%d", session.id or "session", session.nextItemSeq)
+end
+
+function addon:AddResolvedHeldItem(link, quantity)
+    if not link or link == "" then
+        return
+    end
+
+    local session = self:GetCurrentSession()
+    session.resolvedHeldByLink = session.resolvedHeldByLink or {}
+    session.resolvedHeldByLink[link] = (session.resolvedHeldByLink[link] or 0) + math.max(tonumber(quantity) or 0, 0)
+end
+
+function addon:RemoveResolvedHeldItem(link, quantity)
+    if not link or link == "" then
+        return
+    end
+
+    local session = self:GetCurrentSession()
+    session.resolvedHeldByLink = session.resolvedHeldByLink or {}
+    local remaining = (session.resolvedHeldByLink[link] or 0) - math.max(tonumber(quantity) or 0, 0)
+    if remaining > 0 then
+        session.resolvedHeldByLink[link] = remaining
+    else
+        session.resolvedHeldByLink[link] = nil
+    end
+end
+
 function addon:BuildSessionItemList(includeAllEpics)
     local session = self:GetCurrentSession()
     if not session.active then
@@ -364,17 +399,31 @@ function addon:BuildSessionItemList(includeAllEpics)
 
     local tradeableCounts = self:BuildTradeableEpicCounts()
     self:AssignPickupOrder(currentSnapshot, tradeableCounts, includeAllEpics)
+    session.resolvedHeldByLink = session.resolvedHeldByLink or {}
+    for link in pairs(session.resolvedHeldByLink) do
+        local currentEligibleCount = includeAllEpics and (currentSnapshot[link] or 0) or (tradeableCounts[link] or 0)
+        if currentEligibleCount <= 0 then
+            session.resolvedHeldByLink[link] = nil
+        elseif session.resolvedHeldByLink[link] > currentEligibleCount then
+            session.resolvedHeldByLink[link] = currentEligibleCount
+        end
+    end
     local sortedLinks = {}
     for link, totalCount in pairs(currentSnapshot) do
         local eligibleCount = includeAllEpics and totalCount or (tradeableCounts[link] or 0)
         if eligibleCount > 0 then
-            local itemName, _, quality, _, _, _, _, _, _, texture = GetItemInfo(link)
-            sortedLinks[#sortedLinks + 1] = {
-                link = link,
-                count = math.min(totalCount, eligibleCount),
-                name = itemName or link,
-                icon = texture or "Interface\\Icons\\INV_Misc_QuestionMark",
-            }
+            local heldResolved = math.min(eligibleCount, session.resolvedHeldByLink[link] or 0)
+            session.resolvedHeldByLink[link] = heldResolved > 0 and heldResolved or nil
+            local unresolvedCount = eligibleCount - heldResolved
+            if unresolvedCount > 0 then
+                local itemName, _, _, _, _, _, _, _, _, texture = GetItemInfo(link)
+                sortedLinks[#sortedLinks + 1] = {
+                    link = link,
+                    count = unresolvedCount,
+                    name = itemName or link,
+                    icon = texture or "Interface\\Icons\\INV_Misc_QuestionMark",
+                }
+            end
         end
     end
 
@@ -389,12 +438,13 @@ function addon:BuildSessionItemList(includeAllEpics)
 
     local items = {}
     for _, entry in ipairs(sortedLinks) do
-        if not session.itemIdsByLink[entry.link] then
-            session.nextItemSeq = (session.nextItemSeq or 0) + 1
-            session.itemIdsByLink[entry.link] = string.format("%s:%d", session.id or "session", session.nextItemSeq)
+        local currentId = session.itemIdsByLink[entry.link]
+        if not currentId or self:IsItemLocked(currentId) then
+            currentId = self:NextSessionItemId()
+            session.itemIdsByLink[entry.link] = currentId
         end
         items[#items + 1] = {
-            id = session.itemIdsByLink[entry.link],
+            id = currentId,
             link = entry.link,
             name = entry.name,
             icon = entry.icon,
@@ -440,29 +490,20 @@ function addon:RefreshSessionItems(forceRefresh)
         validLinks[item.link] = true
 
         local previousId = previousItemsByLink[item.link]
-        local sourceId = previousResponses[item.id] and item.id or previousId
-        migratedResponses[item.id] = util:CloneTable((sourceId and previousResponses[sourceId]) or {})
+        if previousId and previousId == item.id then
+            migratedResponses[item.id] = util:CloneTable(previousResponses[previousId] or {})
+        else
+            migratedResponses[item.id] = {}
+        end
 
-        if previousLocks[item.id] or (previousId and previousLocks[previousId]) then
+        if previousId and previousId == item.id and previousLocks[previousId] then
             migratedLocks[item.id] = true
         end
     end
 
     session.responses = migratedResponses
     session.lockedItems = migratedLocks
-
-    local migratedResults = {}
-    for _, result in ipairs(previousResults) do
-        local updated = util:CloneTable(result)
-        for _, item in ipairs(session.items) do
-            if updated.itemLink == item.link then
-                updated.itemId = item.id
-                break
-            end
-        end
-        migratedResults[#migratedResults + 1] = updated
-    end
-    session.results = migratedResults
+    session.results = util:CloneTable(previousResults)
 
     for link in pairs(session.itemIdsByLink or {}) do
         if not validLinks[link] then
@@ -504,8 +545,9 @@ function addon:OnBagUpdate()
     local added = {}
     local anyAdded = false
     for link, count in pairs(currentSnapshot) do
-        if count > (previous[link] or 0) then
-            added[link] = true
+        local addedCount = count - (previous[link] or 0)
+        if addedCount > 0 then
+            added[link] = addedCount
             anyAdded = true
         end
     end
@@ -592,6 +634,7 @@ function addon:RemoveResultByItemId(itemId)
     local results = self.session.results or {}
     for index = #results, 1, -1 do
         if results[index].itemId == itemId then
+            self:RemoveResolvedHeldItem(results[index].itemLink, results[index].quantity or 1)
             table.remove(results, index)
         end
     end
@@ -621,6 +664,7 @@ function addon:UnlockAllRolls()
 
     self.session.lockedItems = {}
     self.session.results = {}
+    self.session.resolvedHeldByLink = {}
     self:BroadcastSession()
     self:TriggerCallback("RESULTS_UPDATED")
     self:Print("All loot unlocked for reroll.")

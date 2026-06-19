@@ -749,6 +749,68 @@ function addon:GetItemInfoText(itemName)
     return note ~= "" and note or role
 end
 
+function addon:GetItemAllowedClasses(itemName)
+    local entry = self:GetItemInfoEntry(itemName)
+    if not entry then
+        return nil
+    end
+
+    local note = string.trim(entry.note or "")
+    if note == "" then
+        return nil
+    end
+
+    local allowed = {}
+    for _, token in ipairs(util:Split(note, ",")) do
+        local normalized = util:NormalizeKey(token)
+        local className = configClassAliases[normalized]
+        if className then
+            allowed[className] = true
+        end
+    end
+
+    return next(allowed) and allowed or nil
+end
+
+function addon:IsClassAllowedForItem(itemName, className)
+    local allowed = self:GetItemAllowedClasses(itemName)
+    if not allowed then
+        return true
+    end
+
+    local normalizedClass = configClassAliases[util:NormalizeKey(className or "")]
+    if not normalizedClass then
+        return true
+    end
+
+    return allowed[normalizedClass] == true
+end
+
+function addon:IsPlayerAllowedForItem(itemName, playerName)
+    if not itemName or itemName == "" then
+        return true
+    end
+
+    local playerKey = util:NormalizeKey(playerName or "")
+    local localPlayerKey = util:NormalizeKey(util:GetPlayerName("player") or "")
+    local className
+
+    if playerKey ~= "" and playerKey == localPlayerKey then
+        local localizedClass = select(2, UnitClass("player"))
+        if localizedClass and localizedClass ~= "" then
+            className = string.gsub(string.lower(localizedClass), "deathknight", "death knight")
+        end
+    end
+
+    if not className or className == "" then
+        local attendee = self.GetAttendee and self:GetAttendee(playerName)
+        local rosterProfile = self.GetRosterProfile and self:GetRosterProfile(playerName)
+        className = (attendee and attendee.className) or (rosterProfile and rosterProfile.className) or ""
+    end
+
+    return self:IsClassAllowedForItem(itemName, className)
+end
+
 function addon:SaveImports(rosterText, lootText, namedText)
     if rosterText ~= nil then
         self.config.rosterEntries = self:ParseRosterImport(rosterText or "")
