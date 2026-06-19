@@ -53,6 +53,7 @@ local popupBasePoint, savePopupBasePoint, layoutPopups
 local RESPONSE_ORDER = { bis = 5, ms = 4, mu = 3, os = 2, tm = 1, pass = 0 }
 local RESPONSE_LABELS = { bis = "BiS", ms = "MS", mu = "MU", os = "OS", tm = "TM", pass = "Pass" }
 local ROLL_LINE_LIMIT = 8
+local POPUP_INTEREST_EMPTY_H = 64
 
 local function makeButton(parent, text, width)
     local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
@@ -131,6 +132,11 @@ local function setPopupHeight(f, height)
     f:SetHeight(height)
 end
 
+local function getCompactPopupHeight(f)
+    local subHeight = math.ceil(f.sub:GetStringHeight() or 0)
+    return math.max(POPUP_INTEREST_EMPTY_H, 54 + subHeight)
+end
+
 local function refreshPopupRollLines(self, roll)
     local f = roll and roll.popup
     if not f or f.mode ~= "interest" then
@@ -158,9 +164,12 @@ local function refreshPopupRollLines(self, roll)
         end
     end
 
-    local extraRows = lineCount
-    local extraHeight = extraRows > 0 and (8 + (extraRows * 14)) or 0
-    setPopupHeight(f, POPUP_H + extraHeight)
+    if lineCount == 0 then
+        setPopupHeight(f, getCompactPopupHeight(f))
+    else
+        local extraHeight = 8 + (lineCount * 14)
+        setPopupHeight(f, getCompactPopupHeight(f) + extraHeight)
+    end
     layoutPopups(self)
 end
 
@@ -194,11 +203,7 @@ end
 
 local function positionInterestButtons(f, isOwner)
     f.bisBtn:ClearAllPoints()
-    if isOwner then
-        f.bisBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 8, 32)
-    else
-        f.bisBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 8, 10)
-    end
+    f.bisBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 8, 10)
 end
 
 local function isPlayerAllowedForRoll(self, roll, playerName)
@@ -377,7 +382,7 @@ local function makePopup()
 
     f.name = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     f.name:SetPoint("TOPLEFT", f.icon, "TOPRIGHT", 6, -1)
-    f.name:SetWidth(POPUP_W - 56)
+    f.name:SetWidth(POPUP_W - 166)
     f.name:SetJustifyH("LEFT")
 
     f.sub = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -386,7 +391,7 @@ local function makePopup()
     f.sub:SetJustifyH("LEFT")
 
     f.count = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    f.count:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -8)
+    f.count:SetPoint("TOPRIGHT", f, "TOPRIGHT", -10, -30)
 
     -- choice brackets (top button row): BiS > MS > MU > OS > TM > Pass
     f.bisBtn = makeButton(f, "BiS", 34)
@@ -402,11 +407,11 @@ local function makePopup()
     f.passBtn = makeButton(f, "Pass", 42)
     f.passBtn:SetPoint("LEFT", f.tmBtn, "RIGHT", 3, 0)
 
-    -- control row (loot master): End Roll / Cancel on the left, OK (result mode) on the right
-    f.rollBtn = makeButton(f, "End Roll", 56)
-    f.rollBtn:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 8, 10)
+    -- loot-master action buttons live in the header row; OK (result mode) stays bottom-right.
     f.cancelBtn = makeButton(f, "Cancel", 50)
-    f.cancelBtn:SetPoint("LEFT", f.rollBtn, "RIGHT", 6, 0)
+    f.cancelBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -8, -8)
+    f.rollBtn = makeButton(f, "End", 46)
+    f.rollBtn:SetPoint("RIGHT", f.cancelBtn, "LEFT", -6, 0)
     f.okBtn = makeButton(f, "OK", 60)
     f.okBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -8, 10)
 
@@ -453,8 +458,16 @@ end
 -- confusing). A closing popup frees its slot; the next new popup reuses the lowest free
 -- one.
 layoutPopups = function(self)
-    local yOffset = 0
+    local ordered = {}
     for _, f in ipairs(self.live.active) do
+        ordered[#ordered + 1] = f
+    end
+    table.sort(ordered, function(a, b)
+        return (a.slot or 0) < (b.slot or 0)
+    end)
+
+    local yOffset = 0
+    for _, f in ipairs(ordered) do
         f:ClearAllPoints()
         f:SetPoint("TOP", self.live.anchor or UIParent, "TOP", 0, -yOffset)
         yOffset = yOffset + (f:GetHeight() or POPUP_H) + 8
@@ -503,7 +516,7 @@ local function closePopup(self, f)
             line:Hide()
         end
     end
-    setPopupHeight(f, POPUP_H)
+    setPopupHeight(f, getCompactPopupHeight(f))
     f:Hide()
     removeActive(self, f)
     self.live.pool[#self.live.pool + 1] = f
@@ -521,7 +534,7 @@ end
 -- ---------------------------------------------------------------------------
 -- interest popup
 -- ---------------------------------------------------------------------------
-function addon:ShowInterestPopup(roll)
+function addon:ShowInterestPopup(roll, slot)
     local f = acquirePopup(self)
     f.roll = roll
     roll.popup = f
@@ -548,8 +561,8 @@ function addon:ShowInterestPopup(roll)
     if roll.owner then
         -- the ML keeps the popup to drive the roll: Cancel aborts, Roll! resolves
         f.rollBtn:Show()
-        f.rollBtn:SetWidth(56)
-        f.rollBtn:SetText("End Roll")
+        f.rollBtn:SetWidth(46)
+        f.rollBtn:SetText("End")
         f.rollBtn:SetScript("OnClick", function() self:ResolveLiveRoll(roll.id) end)
         f.cancelBtn:Show()
         f.cancelBtn:SetWidth(50)
@@ -585,7 +598,7 @@ function addon:ShowInterestPopup(roll)
         end
     end)
 
-    addActivePopup(self, f)
+    addActivePopup(self, f, slot)
     f:Show()
     layoutPopups(self)
     self:RefreshInterestPopup(roll)
@@ -684,7 +697,7 @@ function addon:ShowPendingPopup(item, slot)
             line:Hide()
         end
     end
-    setPopupHeight(f, POPUP_H)
+    setPopupHeight(f, getCompactPopupHeight(f))
 
     f.bisBtn:Hide(); f.msBtn:Hide(); f.muBtn:Hide(); f.osBtn:Hide(); f.tmBtn:Hide(); f.passBtn:Hide(); f.okBtn:Hide()
 
@@ -698,11 +711,12 @@ function addon:ShowPendingPopup(item, slot)
     end)
 
     f.rollBtn:Show()
-    f.rollBtn:SetWidth(90)
-    f.rollBtn:SetText("Start Roll")
+    f.rollBtn:SetWidth(46)
+    f.rollBtn:SetText("Start")
     f.rollBtn:SetScript("OnClick", function()
+        local popupSlot = f.slot
         closePopup(self, f)
-        self:StartLiveRoll(item)        -- clears pendingLinks for this item
+        self:StartLiveRoll(item, popupSlot)        -- clears pendingLinks for this item
     end)
 
     f:SetScript("OnEnter", nil)
@@ -958,7 +972,7 @@ function addon:OnCancelMessage(fields)
     self.live.rolls[fields[1]] = nil
 end
 
-function addon:StartLiveRoll(item)
+function addon:StartLiveRoll(item, slot)
     if not self:IsAuthorizedLootMaster() then
         self:Print("Only the loot master can put items up for roll.")
         return
@@ -997,7 +1011,7 @@ function addon:StartLiveRoll(item)
 
     self:SendLargeMessage("DROP",
         { rollId, item.link, item.name or "", item.icon or "", prio or "", tostring(ROLL_DURATION), tostring(item.quantity or 1) }, "RAID")
-    self:ShowInterestPopup(roll)
+    self:ShowInterestPopup(roll, slot)
     self:Print("Put " .. (item.name or item.link) .. " up for roll. Press Roll! when ready.")
 end
 
