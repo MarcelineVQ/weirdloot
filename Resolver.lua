@@ -8,9 +8,11 @@ function addon:BuildRollerList(itemId)
     local session = self:GetCurrentSession()
     local rollers = {}
     local responses = session.responses[itemId] or {}
+    local item = self.GetItemById and self:GetItemById(itemId)
+    local itemName = item and item.name or nil
 
     for playerKey, choice in pairs(responses) do
-        if self:IsResponseActive(choice) then
+        if self:IsResponseActive(choice) and self:IsPlayerAllowedForItem(itemName, playerKey) then
             local attendee = self:GetAttendee(playerKey) or self:GetRosterProfile(playerKey)
             if attendee then
                 rollers[#rollers + 1] = {

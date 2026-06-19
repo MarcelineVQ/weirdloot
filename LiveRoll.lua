@@ -201,6 +201,26 @@ local function positionInterestButtons(f, isOwner)
     end
 end
 
+local function isPlayerAllowedForRoll(self, roll, playerName)
+    local itemName = (roll and roll.name) or ""
+    return self:IsPlayerAllowedForItem(itemName, playerName)
+end
+
+local function applyInterestButtonAvailability(self, f, roll)
+    local playerName = util:GetPlayerName("player")
+    local allowed = isPlayerAllowedForRoll(self, roll, playerName)
+
+    for key, btn in pairs(interestButtons(f)) do
+        if key == "pass" then
+            btn:Enable()
+        elseif allowed then
+            btn:Enable()
+        else
+            btn:Disable()
+        end
+    end
+end
+
 local function formatLootRuleEntry(entry)
     if not entry then
         return ""
@@ -523,6 +543,7 @@ function addon:ShowInterestPopup(roll)
     f.passBtn:SetScript("OnClick", function() self:ChooseInterest(roll, "pass") end)
     resetInterestButtons(f)
     positionInterestButtons(f, roll.owner)
+    applyInterestButtonAvailability(self, f, roll)
 
     if roll.owner then
         -- the ML keeps the popup to drive the roll: Cancel aborts, Roll! resolves
@@ -575,12 +596,7 @@ function addon:RefreshInterestPopup(roll)
     if not f or f.mode ~= "interest" then return end
 
     if roll.owner and roll.itemId then
-        local total = 0
-        for _, choice in pairs(self.session.responses[roll.itemId] or {}) do
-            if self:IsResponseActive(choice) then
-                total = total + 1
-            end
-        end
+        local total = #(self:BuildRollerList(roll.itemId) or {})
         f.count:SetText(total > 0 and (total .. " rolling") or "")
         refreshPopupRollLines(self, roll)
         return
@@ -620,6 +636,11 @@ end
 -- is Pass for a non-ML roller, which dismisses the loot immediately; the ML never
 -- auto-hides (it keeps the popup to drive the roll).
 function addon:ChooseInterest(roll, tier)
+    local playerName = util:GetPlayerName("player")
+    if tier ~= "pass" and not isPlayerAllowedForRoll(self, roll, playerName) then
+        self:Print("Your class cannot use that token. You may only pass.")
+        tier = "pass"
+    end
     self:SendInterest(roll.id, tier)
     roll.choice = tier
 
@@ -904,15 +925,14 @@ function addon:StartLiveRoll(item)
     }
 
     if item.id then
-        for playerKey, choice in pairs(self.session.responses[item.id] or {}) do
-            if self:IsResponseActive(choice) then
-                roll.registrants[playerKey] = {
-                    name = getPlayerDisplayName(self, playerKey),
-                    className = getPlayerClassName(self, playerKey),
-                    tier = choice,
-                    roll = nextLiveRollValue(),
-                }
-            end
+        for _, roller in ipairs(self:BuildRollerList(item.id) or {}) do
+            local playerKey = util:NormalizeKey(roller.name)
+            roll.registrants[playerKey] = {
+                name = roller.name,
+                className = roller.className or getPlayerClassName(self, playerKey),
+                tier = roller.responseType,
+                roll = nextLiveRollValue(),
+            }
         end
     end
 
@@ -1082,6 +1102,9 @@ end
 function addon:RegisterInterest(rollId, name, tier)
     local roll = self.live.rolls[rollId]
     if not roll or roll.resolved then return end
+    if tier ~= "pass" and not isPlayerAllowedForRoll(self, roll, name) then
+        tier = "pass"
+    end
     local playerKey = util:NormalizeKey(name)
     local existing = roll.registrants[playerKey] or {}
     local displayName = (name and name ~= "") and name or existing.name or getPlayerDisplayName(self, playerKey)

@@ -196,6 +196,11 @@ local function getLootItemInfoText(item)
     return note ~= "" and note or role
 end
 
+local function isPlayerAllowedForLootItem(item, playerName)
+    local lookupName = getLootItemLookupName(item)
+    return addon:IsPlayerAllowedForItem(lookupName, playerName)
+end
+
 local function createLabel(parent, text, anchor, relativeTo, relativePoint, offsetX, offsetY)
     local fontString = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     fontString:SetPoint(anchor, relativeTo, relativePoint, offsetX, offsetY)
@@ -278,6 +283,19 @@ end
 local function updateLootChoiceButtons(row, selectedChoice)
     for _, option in ipairs(RESPONSE_BUTTONS) do
         setLootChoiceButtonState(row.choiceButtons and row.choiceButtons[option.key], selectedChoice == option.key)
+    end
+end
+
+local function applyLootChoiceAvailability(row, isLocked, isAllowed)
+    for _, option in ipairs(RESPONSE_BUTTONS) do
+        local button = row.choiceButtons[option.key]
+        if isLocked then
+            button:Disable()
+        elseif not isAllowed and option.key ~= "pass" then
+            button:Disable()
+        else
+            button:Enable()
+        end
     end
 end
 
@@ -891,6 +909,10 @@ function addon:BuildLootTab()
                 end
 
                 local playerName = util:GetPlayerName("player")
+                if option.key ~= "pass" and not isPlayerAllowedForLootItem(row.item, playerName) then
+                    addon:Print("Your class cannot use that token. You may only pass.")
+                    return
+                end
                 if not addon:SetPlayerResponse(row.item.id, playerName, option.key) then
                     return
                 end
@@ -923,18 +945,7 @@ function addon:BuildLootTab()
                 return
             end
 
-            local rollers = {}
-            for playerKey, choice in pairs(addon.session.responses[row.item.id] or {}) do
-                if addon:IsResponseActive(choice) then
-                    local attendee = addon:GetAttendee(playerKey) or addon:GetRosterProfile(playerKey)
-                    rollers[#rollers + 1] = {
-                        name = attendee and attendee.name or playerKey,
-                        className = attendee and attendee.className or "",
-                        specName = attendee and attendee.specName or "",
-                        responseType = addon:GetPlayerResponse(row.item.id, playerKey),
-                    }
-                end
-            end
+            local rollers = addon:BuildRollerList(row.item.id) or {}
 
             table.sort(rollers, function(left, right)
                 return string.lower(left.name or "") < string.lower(right.name or "")
@@ -1543,27 +1554,15 @@ function addon:RefreshLootTab()
         local responseChoice = self:GetPlayerResponse(item.id, playerName)
         updateLootChoiceButtons(row, responseChoice)
         local locked = self:IsItemLocked(item.id)
+        local allowedForPlayer = isPlayerAllowedForLootItem(item, playerName)
         row.icon:SetDesaturated(locked)        -- grey out the item icon once it's been rolled out
-        if locked then
-            for _, option in ipairs(RESPONSE_BUTTONS) do
-                row.choiceButtons[option.key]:Disable()
-            end
-        else
-            for _, option in ipairs(RESPONSE_BUTTONS) do
-                row.choiceButtons[option.key]:Enable()
-            end
-        end
+        applyLootChoiceAvailability(row, locked, allowedForPlayer)
         local typeText, slotText = getLootItemColumns(item.link)
         row.itemType:SetText(typeText)
         row.itemSlot:SetText(slotText)
         row.info:SetText(getLootItemInfoText(item))
 
-        local rollCount = 0
-        for _, choice in pairs(self.session.responses[item.id] or {}) do
-            if self:IsResponseActive(choice) then
-                rollCount = rollCount + 1
-            end
-        end
+        local rollCount = #(self:BuildRollerList(item.id) or {})
         row.state:SetText(string.format("%d roller(s)", rollCount))
     end)
 end
