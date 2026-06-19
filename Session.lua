@@ -20,6 +20,8 @@ local function buildSessionState(ownerKey)
         lockedItems = {},
         pendingLinks = {},
         attendees = {},
+        itemIdsByLink = {},
+        nextItemSeq = 0,
     }
 end
 
@@ -156,6 +158,8 @@ function addon:InitializeSession()
     self.session.ownerKey = ownerKey
     self.session.lockedItems = self.session.lockedItems or {}
     self.session.pendingLinks = self.session.pendingLinks or {}
+    self.session.itemIdsByLink = self.session.itemIdsByLink or {}
+    self.session.nextItemSeq = self.session.nextItemSeq or 0
 end
 
 function addon:BuildBagSnapshot()
@@ -279,6 +283,8 @@ function addon:StartLootSession()
     self.session.lockedItems = {}
     self.session.pendingLinks = {}
     self.session.attendees = util:CloneTable(self:GetAttendees())
+    self.session.itemIdsByLink = {}
+    self.session.nextItemSeq = 0
 
     self.sessionDb.history = self.sessionDb.history or {}
 
@@ -303,6 +309,8 @@ function addon:ClearSession()
     self.session.results = {}
     self.session.lockedItems = {}
     self.session.pendingLinks = {}
+    self.session.itemIdsByLink = {}
+    self.session.nextItemSeq = 0
     self:TriggerCallback("SESSION_UPDATED")
 end
 
@@ -349,9 +357,13 @@ function addon:BuildSessionItemList(includeAllEpics)
     end)
 
     local items = {}
-    for linkIndex, entry in ipairs(sortedLinks) do
+    for _, entry in ipairs(sortedLinks) do
+        if not session.itemIdsByLink[entry.link] then
+            session.nextItemSeq = (session.nextItemSeq or 0) + 1
+            session.itemIdsByLink[entry.link] = string.format("%s:%d", session.id or "session", session.nextItemSeq)
+        end
         items[#items + 1] = {
-            id = string.format("%s:%d", session.id, linkIndex),
+            id = session.itemIdsByLink[entry.link],
             link = entry.link,
             name = entry.name,
             icon = entry.icon,
@@ -378,18 +390,52 @@ function addon:RefreshSessionItems(forceRefresh)
         session.scanMode = "delta"
     end
 
+    local previousItemsByLink = {}
+    for _, item in ipairs(session.items or {}) do
+        previousItemsByLink[item.link] = item.id
+    end
+
+    local previousResponses = session.responses or {}
+    local previousLocks = session.lockedItems or {}
+    local previousResults = session.results or {}
+
     session.items = self:BuildSessionItemList(session.scanMode == "all")
     session.attendees = util:CloneTable(self:GetAttendees())
 
-    local validIds = {}
+    local migratedResponses = {}
+    local migratedLocks = {}
+    local validLinks = {}
     for _, item in ipairs(session.items) do
-        validIds[item.id] = true
-        session.responses[item.id] = session.responses[item.id] or {}
+        validLinks[item.link] = true
+
+        local previousId = previousItemsByLink[item.link]
+        local sourceId = previousResponses[item.id] and item.id or previousId
+        migratedResponses[item.id] = util:CloneTable((sourceId and previousResponses[sourceId]) or {})
+
+        if previousLocks[item.id] or (previousId and previousLocks[previousId]) then
+            migratedLocks[item.id] = true
+        end
     end
 
-    for itemId in pairs(session.responses) do
-        if not validIds[itemId] then
-            session.responses[itemId] = nil
+    session.responses = migratedResponses
+    session.lockedItems = migratedLocks
+
+    local migratedResults = {}
+    for _, result in ipairs(previousResults) do
+        local updated = util:CloneTable(result)
+        for _, item in ipairs(session.items) do
+            if updated.itemLink == item.link then
+                updated.itemId = item.id
+                break
+            end
+        end
+        migratedResults[#migratedResults + 1] = updated
+    end
+    session.results = migratedResults
+
+    for link in pairs(session.itemIdsByLink or {}) do
+        if not validLinks[link] then
+            session.itemIdsByLink[link] = nil
         end
     end
 
