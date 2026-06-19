@@ -545,8 +545,9 @@ function addon:OnBagUpdate()
     local added = {}
     local anyAdded = false
     for link, count in pairs(currentSnapshot) do
-        if count > (previous[link] or 0) then
-            added[link] = true
+        local addedCount = count - (previous[link] or 0)
+        if addedCount > 0 then
+            added[link] = addedCount
             anyAdded = true
         end
     end

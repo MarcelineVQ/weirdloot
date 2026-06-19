@@ -667,7 +667,12 @@ function addon:ShowPendingPopup(item, slot)
     f.timer:Hide()
     f.pendingLink = link
     self.session.pendingLinks = self.session.pendingLinks or {}
-    self.session.pendingLinks[link] = true      -- persisted: re-shown to the ML after a reload
+    self.session.pendingLinks[link] = {
+        link = item.link,
+        name = item.name,
+        icon = item.icon,
+        quantity = item.quantity or 1,
+    }      -- persisted: re-shown to the ML after a reload
 
     f.icon:SetTexture(item.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = link
@@ -879,11 +884,19 @@ function addon:AutoRollAddedItems(addedLinks)
     if not self.db.autoRoll then return end
     if not self:IsAuthorizedLootMaster() then return end
     for _, item in ipairs(self.session.items or {}) do
-        if addedLinks[item.link] then
+        local addedCount = addedLinks[item.link]
+        if addedCount and addedCount > 0 then
             -- Dedup on the actual on-screen popup, NOT the persisted pendingLinks flag
             -- (which can be stale and would wrongly suppress a real new drop).
             if not self:HasOpenPendingForLink(item.link) and not self:HasOpenRollForLink(item.link) then
-                self:ShowPendingPopup(item)
+                local pendingItem = {
+                    id = item.id,
+                    link = item.link,
+                    name = item.name,
+                    icon = item.icon,
+                    quantity = addedCount,
+                }
+                self:ShowPendingPopup(pendingItem)
             end
         end
     end
@@ -902,7 +915,20 @@ function addon:RestorePendingPopups()
             for _, f in ipairs(self.live.active) do
                 if f.mode == "pending" and f.pendingLink == item.link then already = true break end
             end
-            if not already then self:ShowPendingPopup(item) end
+            if not already then
+                local pendingItem = pending[item.link]
+                if type(pendingItem) == "table" then
+                    self:ShowPendingPopup({
+                        id = item.id,
+                        link = item.link,
+                        name = pendingItem.name or item.name,
+                        icon = pendingItem.icon or item.icon,
+                        quantity = pendingItem.quantity or item.quantity or 1,
+                    })
+                else
+                    self:ShowPendingPopup(item)
+                end
+            end
         end
     end
 end
@@ -917,7 +943,7 @@ function addon:CancelLiveRoll(rollId)
     self:SendLargeMessage("CANCEL", { rollId }, "RAID")
     self.live.rolls[rollId] = nil
 
-    local item = { id = roll.itemId, link = roll.link, name = roll.name, icon = roll.icon }
+    local item = { id = roll.itemId, link = roll.link, name = roll.name, icon = roll.icon, quantity = roll.quantity or 1 }
     local slot = roll.popup and roll.popup.slot
     self:CloseInterestPopup(roll)
     self:ShowPendingPopup(item, slot)        -- back to pending in place, not gone
