@@ -866,6 +866,45 @@ function addon:StartLiveRoll(lotId)
     self:Print("Put " .. name .. " up for roll. Press End Roll when ready.")
 end
 
+-- ---------------------------------------------------------------------------
+-- loot-tab roll buttons (upstream UI) routed through the core. Rolls are keyed by lot id
+-- (roll.id == lot.id == item.id), so identity is the lot, never a link, and start/skip go
+-- through the core's lifecycle commands rather than the old link-based popup bookkeeping.
+-- ---------------------------------------------------------------------------
+
+-- The active (unresolved) live roll for a loot row, by lot id. No link fallback or scan: the
+-- roll is stored under the lot id, which is the row's item.id.
+function addon:GetActiveLiveRollForItem(item)
+    if not item or not item.id then return nil end
+    local roll = self.live and self.live.rolls and self.live.rolls[item.id]
+    if roll and not roll.resolved then return roll end
+    return nil
+end
+
+-- Start a roll straight from a loot row. StartLiveRoll surfaces the lot if needed and moves it
+-- to rolling; the resulting ledgerChanged drives SyncPendingPopups to close any pending popup,
+-- so there is nothing link-keyed to dismiss by hand.
+function addon:StartLiveRollFromItem(item)
+    if not item or not item.id then return end
+    self:StartLiveRoll(item.id)
+end
+
+-- Skip a loot row (ML only): move the lot to SKIPPED through the core (Surface first if it is
+-- not already pending). SKIPPED is a snooze that resurfaces on the next scan; SyncPendingPopups
+-- closes its popup off the ledger change.
+function addon:SkipLiveLootItem(item)
+    if not self:IsAuthorizedLootMaster() then
+        self:Print("Only the loot master can skip live loot items.")
+        return
+    end
+    if not item or not item.id then return end
+    local core = self.lootCore
+    local lot = core:Get(item.id)
+    if not lot then return end
+    if lot.state ~= core.STATE.PENDING then core:Surface(item.id) end
+    core:Skip(item.id)
+end
+
 function addon:ResolveLiveRoll(rollId)
     local roll = self.live.rolls[rollId]
     if not roll or roll.resolved then return end

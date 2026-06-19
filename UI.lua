@@ -286,6 +286,29 @@ local function updateLootChoiceButtons(row, selectedChoice)
     end
 end
 
+local function updateLootMasterControlButtons(row, isVisible, activeRoll, isLocked)
+    if not row.startStopButton or not row.skipCancelButton then
+        return
+    end
+
+    if isVisible then
+        row.startStopButton:Show()
+        row.skipCancelButton:Show()
+        row.startStopButton.text:SetText(activeRoll and "End" or "Start")
+        row.skipCancelButton.text:SetText(activeRoll and "Cancel" or "Skip")
+        if activeRoll or not isLocked then
+            row.startStopButton:Enable()
+            row.skipCancelButton:Enable()
+        else
+            row.startStopButton:Disable()
+            row.skipCancelButton:Disable()
+        end
+    else
+        row.startStopButton:Hide()
+        row.skipCancelButton:Hide()
+    end
+end
+
 local function applyLootChoiceAvailability(row, isLocked, isAllowed)
     for _, option in ipairs(RESPONSE_BUTTONS) do
         local button = row.choiceButtons[option.key]
@@ -848,34 +871,34 @@ function addon:BuildLootTab()
     end)
     panel.headerName = headerName
 
-    local headerChoice = createButton(panel, "Roll Type", 112, 18)
-    headerChoice:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 282, -12)
+    local headerChoice = createButton(panel, "Roll Type", 204, 18)
+    headerChoice:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 228, -12)
     headerChoice:SetScript("OnClick", function() end)
     panel.headerChoice = headerChoice
 
-    local headerType = createButton(panel, "Type", 70, 18)
-    headerType:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 472, -12)
+    local headerType = createButton(panel, "Type", 54, 18)
+    headerType:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 490, -12)
     headerType:SetScript("OnClick", function()
         addon:SetLootSortMode("type")
     end)
     panel.headerType = headerType
 
-    local headerSlot = createButton(panel, "Slot", 62, 18)
-    headerSlot:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 550, -12)
+    local headerSlot = createButton(panel, "Slot", 54, 18)
+    headerSlot:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 548, -12)
     headerSlot:SetScript("OnClick", function()
         addon:SetLootSortMode("slot")
     end)
     panel.headerSlot = headerSlot
 
-    local headerInfo = createButton(panel, "Info", 78, 18)
-    headerInfo:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 620, -12)
+    local headerInfo = createButton(panel, "Info", 70, 18)
+    headerInfo:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 608, -12)
     headerInfo:SetScript("OnClick", function()
         addon:SetLootSortMode("info")
     end)
     panel.headerInfo = headerInfo
 
     local headerRollers = createButton(panel, "Rollers", 80, 18)
-    headerRollers:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 846, -12)
+    headerRollers:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 804, -12)
     headerRollers:SetScript("OnClick", function() end)
     panel.headerRollers = headerRollers
 
@@ -888,14 +911,46 @@ function addon:BuildLootTab()
         row.icon:SetPoint("LEFT", row, "LEFT", 4, 0)
 
         row.name = createLabel(row, "", "LEFT", row.icon, "RIGHT", 8, 0)
-        row.name:SetWidth(228)
+        row.name:SetWidth(176)
+
+        row.startStopButton = createLootChoiceButton(row, "Start", 42)
+        row.startStopButton:SetPoint("LEFT", row, "LEFT", 210, 0)
+        row.startStopButton:SetScript("OnClick", function()
+            if not row.item or not addon:IsAuthorizedLootMaster() then
+                return
+            end
+
+            local activeRoll = addon:GetActiveLiveRollForItem(row.item)
+            if activeRoll then
+                addon:ResolveLiveRoll(activeRoll.id)
+            else
+                addon:StartLiveRollFromItem(row.item)
+            end
+        end)
+        row.startStopButton:Hide()
+
+        row.skipCancelButton = createLootChoiceButton(row, "Skip", 46)
+        row.skipCancelButton:SetPoint("LEFT", row.startStopButton, "RIGHT", 2, 0)
+        row.skipCancelButton:SetScript("OnClick", function()
+            if not row.item or not addon:IsAuthorizedLootMaster() then
+                return
+            end
+
+            local activeRoll = addon:GetActiveLiveRollForItem(row.item)
+            if activeRoll then
+                addon:CancelLiveRoll(activeRoll.id)
+            else
+                addon:SkipLiveLootItem(row.item)
+            end
+        end)
+        row.skipCancelButton:Hide()
 
         row.choiceButtons = {}
         local previousButton
         for _, option in ipairs(RESPONSE_BUTTONS) do
             local responseButton = createLootChoiceButton(row, option.label, option.width)
             if not previousButton then
-                responseButton:SetPoint("LEFT", row, "LEFT", 256, 0)
+                responseButton:SetPoint("LEFT", row.skipCancelButton, "RIGHT", 4, 0)
             else
                 responseButton:SetPoint("LEFT", previousButton, "RIGHT", 2, 0)
             end
@@ -913,8 +968,10 @@ function addon:BuildLootTab()
                     addon:Print("Your class cannot use that token. You may only pass.")
                     return
                 end
-                -- SetPlayerResponse routes itself: the ML writes the core (snapshot syncs out),
-                -- a raider whispers the pick to the ML. No separate broadcast needed here.
+                -- SetPlayerResponse routes itself: the ML writes the core (delta syncs out),
+                -- a raider whispers the pick to the ML. The loot tab and the live roll share the
+                -- lot's responses, so a loot-tab pick already reflects on the roll. No separate
+                -- SendInterest/BroadcastSelectionState path (upstream's, deferred with LiveRoll).
                 if not addon:SetPlayerResponse(row.item.id, playerName, option.key) then
                     return
                 end
@@ -924,17 +981,17 @@ function addon:BuildLootTab()
             previousButton = responseButton
         end
 
-        row.itemType = createLabel(row, "", "LEFT", row, "LEFT", 472, 0)
-        row.itemType:SetWidth(72)
+        row.itemType = createLabel(row, "", "LEFT", row, "LEFT", 490, 0)
+        row.itemType:SetWidth(52)
 
-        row.itemSlot = createLabel(row, "", "LEFT", row, "LEFT", 550, 0)
-        row.itemSlot:SetWidth(64)
+        row.itemSlot = createLabel(row, "", "LEFT", row, "LEFT", 548, 0)
+        row.itemSlot:SetWidth(54)
 
-        row.info = createLabel(row, "", "LEFT", row, "LEFT", 620, 0)
-        row.info:SetWidth(216)
+        row.info = createLabel(row, "", "LEFT", row, "LEFT", 608, 0)
+        row.info:SetWidth(188)
 
-        row.state = createLabel(row, "", "LEFT", row, "LEFT", 846, 0)
-        row.state:SetWidth(72)
+        row.state = createLabel(row, "", "LEFT", row, "LEFT", 804, 0)
+        row.state:SetWidth(80)
         row.state:SetJustifyH("LEFT")
         row.stateHitbox = CreateFrame("Frame", nil, row)
         row.stateHitbox:SetPoint("TOPLEFT", row.state, "TOPLEFT", -4, 4)
@@ -1012,7 +1069,7 @@ function addon:BuildLootTab()
 
             if button == "RightButton" then
                 if addon:IsAuthorizedLootMaster() then
-                    addon:StartLiveRoll(selfRow.item)   -- put this item up for a live roll
+                    addon:StartLiveRollFromItem(selfRow.item)
                 end
                 return
             end
@@ -1568,6 +1625,7 @@ function addon:RefreshLootTab()
         local allowedForPlayer = isPlayerAllowedForLootItem(item, playerName)
         row.icon:SetDesaturated(locked)        -- grey out the item icon once it's been rolled out
         applyLootChoiceAvailability(row, locked, allowedForPlayer)
+        updateLootMasterControlButtons(row, self:IsAuthorizedLootMaster(), self:GetActiveLiveRollForItem(item), locked)
         local typeText, slotText = getLootItemColumns(item.link)
         row.itemType:SetText(typeText)
         row.itemSlot:SetText(slotText)
