@@ -36,23 +36,48 @@ a focused unit instead of being sprinkled through the addon.
 The core never touches a frame, a `SendCommMessage`, or `GetContainerItemInfo`. Those are fed to
 it. That separation is the whole point.
 
+## Distribution model (decided 2026-06-19)
+ONE roll per item, top-N winners (upstream's UX): N identical copies show as a single popup
+labelled "xN", run as one roll, and the top N distinct rollers each win one copy (a player wins
+at most one). The core is agnostic to this; it just keeps the accounting true underneath by
+mapping the resolved ordered winners onto per-copy disposition records.
+
+## Identity: itemId, never the link or name
+Item links embed a localized name and client-specific data, so the SAME item can present
+different links/names across clients. The core's identity key is the numeric **itemId** parsed
+from the link by the caller. The core stores only `itemId`; name/link/icon are rendered on
+demand from it (`GetItemInfo(itemId)`), and sync carries `itemId` so each client renders its
+own localized name. No consumer matches loot by link.
+
 ## Data model
+A **Lot** is the rollable unit: one per itemId group, holding the single group-level response
+set under a stable id. On resolve it freezes per-copy **awards** that each carry their own
+delivery disposition.
 ```
-LootCopy = {
-  id,        -- "C:<seq>"  unique within a session, NEVER reused
-  itemId,    -- numeric WoW item id (for payout/trade), NOT an identity key
-  link, name, icon,
-  state,     -- see state machine
-  rolls = { [playerKey] = { tier = "ms"|..., roll = 73 } },  -- this copy's rolls ONLY
-  winner,    -- playerKey or nil, set at resolve
-  outcome,   -- nil until resolve, then "won" | "passed" (no winner). Set ONLY at resolve.
-  recipient, -- set at MarkDelivered (who actually received it)
+Lot = {
+  id,        -- "L:<seq>"  unique within a session, NEVER reused (the stale-roll fix)
+  itemId,    -- numeric WoW item id: the ONLY identity. name/link/icon rendered on demand.
+  state,     -- lot state: new | idle | pending | rolling | resolved | skipped
+  count,     -- pre-resolve: number of live fungible copies in the ML's bags
+  responses = { [playerKey] = <opaque> },  -- ONE group roll's responses (addon: a tier string)
+  awards,    -- nil until resolve; then array length = count-at-resolve, one per copy:
+             --   { winner = playerKey|nil,
+             --     state  = owed | resolved | delivered | removed,
+             --     recipient, deliveredAt }
+  record,    -- the resolver's full result record (for UI/log), set at resolve
 }
-Ledger = { [id] = LootCopy }      -- the authoritative map
-seq                                -- monotonic counter; ledger ids come from here
+Ledger = { [id] = Lot }            -- the authoritative map
+seq                                -- monotonic counter; lot ids come from here, never reused
 ```
-**Identity invariant:** a copy is identified by `id` and nothing else, ever. No consumer is
-allowed to look a copy up by link. (This single rule kills the stale-roll class of bugs.)
+**Award states** are the per-copy disposition: `owed` (non-ML winner, awaiting delivery),
+`resolved` (self-win or no winner, the ML already holds it), `delivered` (terminal, traded and
+recorded), `removed` (terminal, left bags with no delivery reported). `delivered`/`removed` are
+the only true terminals; a resolved lot stays in the ledger as the session loot log.
+
+**Identity invariant:** a lot is grouped by `itemId` and addressed by its stable `id`, nothing
+else, ever. Responses live on the lot under that stable id, so a re-dropped duplicate after a
+resolve mints a NEW lot (new id, empty responses) instead of inheriting stale ones. (This kills
+the stale-roll class of bugs.)
 
 ## State machine
 ```
@@ -126,57 +151,70 @@ time the bag scan sees the drop, which is what keeps the "which copy left" choic
 UI/comm timing; a copy's physical fate is a recorded transition, never inferred. The ML owns this;
 raiders never run it (they mirror, see Sync).
 
-## Resolution (delegates to the existing Resolver)
+## Resolution (delegates to the existing Resolver, top-N -> awards)
 The core does NOT reimplement winner-picking. `Resolver.lua` already does the hard part
-(bracket then named-rule then spec then status then roll). The core's only job at resolve time is
-to hand the Resolver exactly ONE copy's rolls, keyed by stable id, and store what comes back:
+(bracket then named-rule then spec then status then roll, capped to the item's count via
+`SelectWinningRolls(quantity)`). The core's only job at resolve time is to hand the Resolver
+exactly ONE lot's responses, keyed by stable id, and freeze the ordered winners onto per-copy
+awards:
 ```
 core:Resolve(id):
-  copy = ledger[id]                                  -- by id, ONLY
-  record = addon:ResolveSessionItem(copy)            -- reads copy.rolls (== this id's rolls)
-  copy.winner  = record.winner
-  copy.outcome = record.winner and "won" or "passed" -- "passed" covers all-declined AND silence
-  copy.state   = (record.winner and not isML(record.winner)) and "owed" or "resolved"
-  return record                                      -- "owed" copies await MarkDelivered
+  lot = ledger[id]                              -- by id, ONLY
+  record  = addon:ResolveSessionItem(lot)       -- reads lot.responses + lot.count (quantity)
+  winners = record.winners or {record.winner}   -- ORDERED, length <= lot.count
+  lot.awards = {}
+  for i = 1, lot.count:
+    w = winners[i]
+    lot.awards[i] = { winner = w,
+                      state  = (w and not isML(w)) and "owed" or "resolved" }
+  lot.state  = "resolved"
+  lot.record = record
+  return record                                 -- "owed" awards await MarkDelivered
 ```
-The split: the **core** owns WHICH rolls belong to WHICH copy (the thing that broke); the
-**Resolver** owns HOW to pick from a given set of rolls (already correct). An all-pass copy hands
-over empty rolls, so the Resolver returns no winner. The old stale-roll bug was a link lookup
-feeding the Resolver a different copy's rolls; routing every resolve through `ledger[id]` makes
-that impossible by construction.
+The split: the **core** owns WHICH responses belong to WHICH lot and how the N winners map onto
+N copies (the things that broke); the **Resolver** owns HOW to pick the top N from a set of
+responses (already correct). Surplus copies (fewer rollers than copies) get `winner = nil`,
+state `resolved` (the ML keeps them). The old stale-roll bug was a link/positional-id lookup
+feeding the Resolver a different lot's responses; routing every resolve through `ledger[id]`
+under a stable id makes that impossible by construction.
 
-`outcome` is `won` or `passed` (where `passed` covers both "everyone declined" and "nobody
-responded"; they are equivalent for disposition). It is set only here, at resolve. It exists to
-drive optional downstream actions without re-deriving anything: a `passed` copy is the signal to
-offer a one-click re-roll (`Unlock(id)` takes it `resolved -> idle` to surface again) or to route
-it to disenchant, and it reads cleanly in the loot log ("Mantle: no winner (passed)"). `cancel`
-and `skip` are state transitions, not outcomes: cancel sends a live roll `rolling -> pending`,
-skip sends a pending copy `pending -> skipped`. Neither writes `outcome` or any history.
+A lot's per-copy fate then evolves independently: an `owed` award becomes `delivered` via
+`MarkDeliveredFor(player, itemId)` (FIFO over that player's owed copies) when TradeDeliver
+completes the trade, or `removed` if the copy leaves the bags with no delivery reported.
+`Unlock(id)` takes a resolved lot back to `idle` (drops awards + responses) to re-roll. `cancel`
+and `skip` are state transitions, not dispositions: cancel sends a live roll `rolling -> pending`,
+skip sends a pending lot `pending -> skipped`.
 
 ## API surface (the seam)
 ```
+-- wiring (set once by consumers; keeps the core pure)
+core:SetResolver(fn)        -- fn(lot) -> { winners = {orderedKeys} }
+core:SetML(playerKey)
+
 -- mutation (ML)
-core:Reconcile(eligibleCounts, freshLinks)
-core:Surface(id)            -- new/skipped/idle -> pending
+core:Reconcile(eligible, freshLinks)  -- eligible/freshLinks keyed by itemId
+core:Surface(id)            -- new/idle/skipped -> pending
 core:Skip(id)               -- pending -> skipped
-core:StartRoll(id)          -- pending -> rolling; clears rolls
-core:RecordRoll(id, player, tier, roll)
-core:Resolve(id) -> result   -- winner(other) -> "owed"; self-win/all-pass stay resolved
-core:Unlock(id) / core:UnlockAll()   -- resolved/owed -> idle (reroll; retracts the owe)
-core:MarkDelivered(id, recipient)    -- owed -> delivered (called by TradeDeliver)
+core:StartRoll(id)          -- pending -> rolling; clears responses
+core:Cancel(id)             -- rolling -> pending
+core:SetResponse(id, player, value)   -- record one response (pre-roll or live)
+core:Resolve(id) -> record  -- rolling -> resolved; freezes top-N onto per-copy awards
+core:Unlock(id) / core:UnlockAll()    -- resolved -> idle (reroll; drops awards + responses)
+core:MarkDelivered(id, awardIndex, recipient, when)  -- owed award -> delivered (low-level)
+core:MarkDeliveredFor(player, itemId, when)          -- FIFO owed -> delivered (TradeDeliver)
 
 -- queries (UI / popups)
-core:Get(id) / core:State(id) / core:IsResolved(id)
-core:Surfaceable()          -- copies in {new, skipped} awaiting the ML
-core:List()                 -- ordered projection for the UI/list (live copies)
-core:Log()                  -- terminal copies (delivered/removed): the session loot history
+core:Get(id) / core:State(id) / core:IsResolved(id) / core:LiveCount(id)
+core:Surfaceable()          -- lots in {new, skipped} awaiting the ML
+core:List()                 -- live lots, mint order (the loot-tab projection)
+core:Resolved() / core:Log() -- rolled lots; awards carry per-copy disposition
 
 -- sync
-core:Serialize() -> snapshot           -- ML -> broadcast
+core:Serialize() -> snapshot           -- ML -> broadcast (carries itemId, not links)
 core:ApplyRemote(snapshot)             -- raider mirror (authoritative-replace)
 
 -- events (so consumers react instead of polling)
-core.on.copyAdded / copyResolved / copyDelivered / copyUnlocked / ledgerChanged
+core:On(event, fn)          -- lotAdded / lotResolved / lotDelivered / lotUnlocked / ledgerChanged
 ```
 
 ## Invariants (the rules that prevent every bug we hit)
