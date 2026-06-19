@@ -441,6 +441,84 @@ local function formatRollItemLabel(link, name, quantity)
 end
 
 -- ---------------------------------------------------------------------------
+-- item-name resolution for popups
+--
+-- Popups render their label from the lot's itemId via util:ItemRender (GetItemInfo). On a
+-- cache miss (an item the client has not cached yet -- always the case for raiders, who get
+-- only the itemId over the wire, and often for the ML on a fresh drop) GetItemInfo returns
+-- nil and the label freezes as "item:<id>". Unlike the Loot tab (rebuilt on every
+-- ledgerChanged), a popup is built once, so without this it would never recover. We prime
+-- the client cache and re-render on a ticker until the real name arrives.
+-- ---------------------------------------------------------------------------
+
+-- Force the client to fetch an item's data (3.3.5a has no GET_ITEM_INFO_RECEIVED event).
+function addon:PrimeItemInfo(itemId)
+    if not itemId then return end
+    if not self._scanTip then
+        self._scanTip = CreateFrame("GameTooltip", "WeirdLootScanTip", UIParent, "GameTooltipTemplate")
+    end
+    self._scanTip:SetOwner(UIParent, "ANCHOR_NONE")
+    self._scanTip:SetHyperlink("item:" .. tostring(itemId))
+end
+
+-- Re-render a popup's name/icon/link from its itemId. Returns true once the name resolves.
+function addon:RefreshPopupItem(f)
+    if not f or not f.itemId then return true end
+    local name, link, icon = util:ItemRender(f.itemId)
+    if not name then return false end
+    f.itemLink = link
+    f.icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+    f.name:SetText(formatRollItemLabel(link, name, f.itemQuantity))
+    if f.mode == "pending" then
+        f.sub:SetText("|cffffffffPrio:|r " .. (self:GetLiveItemPrio({ name = name }) or "BiS > MS > MU > OS > TM"))
+    end
+    if f.roll then f.roll.name = name; f.roll.link = link; f.roll.icon = icon end
+    return true
+end
+
+-- Drive a ~0.25s sweep over open popups, re-rendering any whose name has not resolved yet.
+-- Self-stops when every popup has a real name, and re-arms when a new unresolved popup opens.
+function addon:EnsureNameTicker()
+    local anchor = self.live and self.live.anchor
+    if not anchor or anchor.__nameTicker then return end
+    anchor.__nameTicker = true
+    anchor.__nameAccum = 0
+    anchor:SetScript("OnUpdate", function(_, elapsed)
+        anchor.__nameAccum = anchor.__nameAccum + (elapsed or 0)
+        if anchor.__nameAccum < 0.25 then return end
+        anchor.__nameAccum = 0
+        local pending = 0
+        for _, f in ipairs(self.live.active or {}) do
+            if f.itemId and not f.itemResolved then
+                if self:RefreshPopupItem(f) then
+                    f.itemResolved = true
+                else
+                    pending = pending + 1
+                end
+            end
+        end
+        if pending == 0 then
+            anchor:SetScript("OnUpdate", nil)
+            anchor.__nameTicker = nil
+        end
+    end)
+end
+
+-- Record the itemId a popup is showing. If its name is not cached yet, prime the client and
+-- start the resolve ticker; the creation-site render already shows the "item:<id>" fallback.
+function addon:TrackPopupItem(f, itemId, quantity)
+    f.itemId = itemId
+    f.itemQuantity = quantity
+    if itemId and util:ItemRender(itemId) then
+        f.itemResolved = true
+    else
+        f.itemResolved = false
+        self:PrimeItemInfo(itemId)
+        self:EnsureNameTicker()
+    end
+end
+
+-- ---------------------------------------------------------------------------
 -- interest popup
 -- ---------------------------------------------------------------------------
 function addon:ShowInterestPopup(roll)
@@ -453,6 +531,7 @@ function addon:ShowInterestPopup(roll)
     f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = roll.link
     f.name:SetText(formatRollItemLabel(roll.link, roll.name, roll.quantity))
+    self:TrackPopupItem(f, roll.itemId, roll.quantity)
     f.sub:SetText("|cffffffffPrio:|r " .. ((roll.prio and roll.prio ~= "") and roll.prio or "BiS > MS > MU > OS > TM"))
     f.okBtn:Hide()
 
@@ -579,6 +658,7 @@ function addon:ShowPendingPopup(lot, slot)
     f.icon:SetTexture(icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = link
     f.name:SetText(formatRollItemLabel(link, name, quantity))
+    self:TrackPopupItem(f, lot.itemId, quantity)
     f.sub:SetText("|cffffffffPrio:|r " .. (self:GetLiveItemPrio({ name = name }) or "BiS > MS > MU > OS > TM"))
     f.count:Hide()
 
@@ -618,6 +698,7 @@ function addon:ShowResultPopup(roll, winners, sections, slot)
     f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = roll.link
     f.name:SetText(formatRollItemLabel(roll.link, roll.name, roll.quantity))
+    self:TrackPopupItem(f, roll.itemId, roll.quantity)
 
     winners = winners or {}
     local myKey = util:NormalizeKey(util:GetPlayerName("player") or "")
@@ -730,7 +811,7 @@ function addon:CancelLiveRoll(rollId)
     local roll = self.live.rolls[rollId]
     if not roll then return end
     roll.resolved = true
-    self:SendLargeMessage("CANCEL", { rollId }, "RAID")
+    self:SendLargeMessage("CANCEL", { rollId }, "RAID", nil, "ALERT")
     self.live.rolls[rollId] = nil
 
     self:CloseInterestPopup(roll)
@@ -780,7 +861,7 @@ function addon:StartLiveRoll(lotId)
 
     -- the wire carries the itemId (not a link): every client renders its own localized name
     self:SendLargeMessage("DROP",
-        { lotId, tostring(lot.itemId), prio or "", tostring(ROLL_DURATION), tostring(quantity) }, "RAID")
+        { lotId, tostring(lot.itemId), prio or "", tostring(ROLL_DURATION), tostring(quantity) }, "RAID", nil, "ALERT")
     self:ShowInterestPopup(roll)
     self:Print("Put " .. name .. " up for roll. Press End Roll when ready.")
 end
@@ -805,7 +886,7 @@ function addon:ResolveLiveRoll(rollId)
     -- the wire carries itemId (not a link) and the full winners list (top-N may be > 1)
     self:SendLargeMessage("WIN", {
         rollId, tostring(roll.itemId or 0), winnersText, "roll", "0", self:EncodeSections(sections),
-    }, "RAID")
+    }, "RAID", nil, "ALERT")
     self:TriggerCallback("RESULTS_UPDATED")
 
     local slot = roll.popup and roll.popup.slot
@@ -873,7 +954,7 @@ function addon:SendInterest(rollId, tier)
     else
         local lootMaster = self:GetLootMasterName()
         if lootMaster then
-            self:SendLargeMessage("RSP", { rollId, tier }, "WHISPER", lootMaster)
+            self:SendLargeMessage("RSP", { rollId, tier }, "WHISPER", lootMaster, "ALERT")
         end
     end
 end

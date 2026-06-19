@@ -20,6 +20,11 @@ local function buildSessionState(ownerKey)
         lockedItems = {},
         pendingLinks = {},
         attendees = {},
+        itemIdsByLink = {},
+        nextItemSeq = 0,
+        itemOrderByLink = {},
+        nextItemOrder = 0,
+        resolvedHeldByLink = {},
     }
 end
 
@@ -323,6 +328,11 @@ function addon:StartLootSession()
     self.session.lockedItems = {}
     self.session.pendingLinks = {}
     self.session.attendees = util:CloneTable(self:GetAttendees())
+    self.session.itemIdsByLink = {}
+    self.session.nextItemSeq = 0
+    self.session.itemOrderByLink = {}
+    self.session.nextItemOrder = 0
+    self.session.resolvedHeldByLink = {}
 
     -- Wipe the ledger and baseline the loot already in bags as idle (not fresh drops), so a
     -- session started mid-bag does not auto-roll everything the ML is already carrying.
@@ -391,31 +401,53 @@ function addon:BuildSessionItemList(includeAllEpics)
     end
 
     local tradeableCounts = self:BuildTradeableEpicCounts()
+    self:AssignPickupOrder(currentSnapshot, tradeableCounts, includeAllEpics)
+    session.resolvedHeldByLink = session.resolvedHeldByLink or {}
+    for link in pairs(session.resolvedHeldByLink) do
+        local currentEligibleCount = includeAllEpics and (currentSnapshot[link] or 0) or (tradeableCounts[link] or 0)
+        if currentEligibleCount <= 0 then
+            session.resolvedHeldByLink[link] = nil
+        elseif session.resolvedHeldByLink[link] > currentEligibleCount then
+            session.resolvedHeldByLink[link] = currentEligibleCount
+        end
+    end
     local sortedLinks = {}
     for link, totalCount in pairs(currentSnapshot) do
         local eligibleCount = includeAllEpics and totalCount or (tradeableCounts[link] or 0)
         if eligibleCount > 0 then
-            local itemName, _, quality, _, _, _, _, _, _, texture = GetItemInfo(link)
-            sortedLinks[#sortedLinks + 1] = {
-                link = link,
-                count = math.min(totalCount, eligibleCount),
-                name = itemName or link,
-                icon = texture or "Interface\\Icons\\INV_Misc_QuestionMark",
-            }
+            local heldResolved = math.min(eligibleCount, session.resolvedHeldByLink[link] or 0)
+            session.resolvedHeldByLink[link] = heldResolved > 0 and heldResolved or nil
+            local unresolvedCount = eligibleCount - heldResolved
+            if unresolvedCount > 0 then
+                local itemName, _, _, _, _, _, _, _, _, texture = GetItemInfo(link)
+                sortedLinks[#sortedLinks + 1] = {
+                    link = link,
+                    count = unresolvedCount,
+                    name = itemName or link,
+                    icon = texture or "Interface\\Icons\\INV_Misc_QuestionMark",
+                }
+            end
         end
     end
 
     table.sort(sortedLinks, function(left, right)
-        if left.name == right.name then
+        local leftOrder = session.itemOrderByLink[left.link] or math.huge
+        local rightOrder = session.itemOrderByLink[right.link] or math.huge
+        if leftOrder == rightOrder then
             return left.link < right.link
         end
-        return left.name < right.name
+        return leftOrder < rightOrder
     end)
 
     local items = {}
-    for linkIndex, entry in ipairs(sortedLinks) do
+    for _, entry in ipairs(sortedLinks) do
+        local currentId = session.itemIdsByLink[entry.link]
+        if not currentId or self:IsItemLocked(currentId) then
+            currentId = self:NextSessionItemId()
+            session.itemIdsByLink[entry.link] = currentId
+        end
         items[#items + 1] = {
-            id = string.format("%s:%d", session.id, linkIndex),
+            id = currentId,
             link = entry.link,
             name = entry.name,
             icon = entry.icon,
@@ -502,6 +534,9 @@ function addon:SetPlayerResponse(lotId, playerName, choice)
         if self.RefreshLiveRollCountForItem then
             self:RefreshLiveRollCountForItem(lotId)
         end
+        -- SetResponse does not emit ledgerChanged (it is not a lifecycle change), so push the
+        -- updated lot to the raiders explicitly. The lot is already dirty, so this is one LOTD.
+        self:AutoBroadcastSession()
     end
     return applied
 end

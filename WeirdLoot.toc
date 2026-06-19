@@ -3,7 +3,7 @@
 ## Notes: End-of-raid loot coordination for Wrath 3.3.5a raids
 ## Author: Volcker
 ## Version: 0.0.1
-## SavedVariables: WeirdLootDB, WeirdLootSessionDB
+## SavedVariables: WeirdLootDB, WeirdLootSessionDB, WeirdLootDebugLog
 
 Libs\LibStub\LibStub.lua
 Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
@@ -13,6 +13,7 @@ TradeDeliver.lua
 
 Core.lua
 LootCore.lua
+Debug.lua
 Util.lua
 Config.lua
 Roster.lua

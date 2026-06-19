@@ -177,8 +177,8 @@ local function makeWorld(playerName, isML)
     local libs = {}
     local aceComm = {
         Embed = function(_, target)
-            target.SendCommMessage = function(_, prefix, msg, dist, tgt)
-                WIRE[#WIRE + 1] = { prefix = prefix, msg = msg, dist = dist, target = tgt, sender = playerName }
+            target.SendCommMessage = function(_, prefix, msg, dist, tgt, prio)
+                WIRE[#WIRE + 1] = { prefix = prefix, msg = msg, dist = dist, target = tgt, sender = playerName, prio = prio }
             end
             target.RegisterComm = function() end
         end,
@@ -267,6 +267,43 @@ local function flushWireTo(target, fromSender)
     end
 end
 local function clearWire() WIRE = {} end
+
+-- canonical "what a client should see" view of the synced ledger: every lot the ML would
+-- broadcast (resolved or live, not removed), as id|itemId|state|liveCount|responses|winners.
+-- The ML reads its authoritative awards/LiveCount; a raider reads the fields it received.
+local function syncView(w)
+    local core = w.addon.lootCore
+    local isML = w.addon:IsAuthorizedLootMaster()
+    local rows = {}
+    for _, lot in ipairs(core:All()) do
+        local live = isML and core:LiveCount(lot.id) or (lot.count or 0)
+        if (not lot.removed) and (lot.state == core.STATE.RESOLVED or live > 0) then
+            local resp = {}
+            for k, v in pairs(lot.responses or {}) do resp[#resp + 1] = k .. "=" .. v end
+            table.sort(resp)
+            local winners = {}
+            if isML then
+                for _, a in ipairs(lot.awards or {}) do if a.winner then winners[#winners + 1] = a.winner end end
+            elseif lot.record then
+                for _, win in ipairs(lot.record.winners or {}) do winners[#winners + 1] = win end
+            end
+            rows[#rows + 1] = table.concat({ lot.id, tostring(lot.itemId), lot.state, tostring(live),
+                table.concat(resp, ","), table.concat(winners, ",") }, "|")
+        end
+    end
+    table.sort(rows)
+    return table.concat(rows, "\n")
+end
+
+-- deterministic, reproducible PRNG for the fuzz sequence (independent of any world's rng)
+local function makeRng(seed)
+    return function(m, n)
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        local r = seed / 2147483648
+        if m and n then return m + math.floor(r * (n - m + 1)) end
+        return r
+    end
+end
 
 -- physical bag (drives TradeDeliver), distinct from the eligible-count model (drives reconcile)
 local function putBag(w, bag, slot, id, count) w.env.__bags[bag][slot] = { id = id, count = count, link = linkFor(id) } end
@@ -519,12 +556,116 @@ test("raider pick whispers the ML and is applied", function()
     setBag(ml, 40005, 1); bagUpdate(ml)
     local lot = openLot(ml, 40005)
     ml.addon:StartLiveRoll(lot.id)
-    flushWireTo(raider)                 -- raider gets the DROP + snapshot
+    ml.addon:BroadcastSession()        -- raider first syncs the session (SNAP_BEGIN sets context), as on join
+    flushWireTo(raider)                -- raider gets the DROP + delta + full snapshot
     -- raider records a loot-tab response -> routed to ML as a SELECTION whisper
     raider.addon:SetPlayerResponse(lot.id, "Raidertwo", "ms")
     flushWireTo(ml)                     -- ML receives the SELECTION
     local L = ml.addon.lootCore:Get(lot.id)
     check(L.responses["raidertwo"] ~= nil, "ML recorded the raider's pick on the lot")
+end)
+
+test("delta sync: a single change sends a LOTD delta, not a full snapshot", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local raider = makeWorld("Raidertwo", false)
+    startSession(ml)
+    setBag(ml, 40006, 1); bagUpdate(ml)
+    local lot = openLot(ml, 40006)
+    ml.addon:BroadcastSession()          -- baseline: full snapshot
+    flushWireTo(raider)
+    check(raider.addon.lootCore:Get(lot.id) ~= nil, "raider has the lot after baseline snapshot")
+
+    -- a single state change must delta-sync (LOTD), never a full SNAP_BEGIN burst
+    clearWire()
+    ml.addon:StartLiveRoll(lot.id)
+    local snaps, deltas = 0, 0
+    for _, m in ipairs(WIRE) do
+        local cmd = string.match(m.msg, "^[^|]+")
+        if cmd == "SNAP_BEGIN" then snaps = snaps + 1 end
+        if cmd == "LOTD" then deltas = deltas + 1 end
+    end
+    eq(snaps, 0, "no full snapshot emitted for a single change")
+    check(deltas >= 1, "a LOTD delta was sent")
+
+    flushWireTo(raider)
+    eq(raider.addon.lootCore:Get(lot.id).state, "rolling", "raider mirrored the delta (now rolling)")
+end)
+
+test("delta fuzz: a delta-synced raider always equals the ML across random operations", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local raider = makeWorld("Raidertwo", false)
+    startSession(ml)
+    ml.addon:BroadcastSession(); flushWireTo(raider)      -- initial baseline
+    local rng = makeRng(20260619)
+    local items = { 40001, 40002, 40003, 40004, 40050, 40051 }
+    local players = { "Alice", "Bob", "Cara", "Dan", "Eve", "Finn" }
+    local tiers = { "bis", "ms", "mu", "os", "tm", "pass" }
+    local bag = {}
+
+    local function lotsByState(stateSet)
+        local out = {}
+        for _, lot in ipairs(ml.addon.lootCore:All()) do
+            if stateSet[lot.state] and not lot.removed then out[#out + 1] = lot end
+        end
+        return out
+    end
+    local function pick(t) return #t > 0 and t[rng(1, #t)] or nil end
+
+    local mismatch = nil
+    for step = 1, 200 do
+        local op = rng(1, 100)
+        if op <= 32 then                                  -- drop / grow an item
+            local id = items[rng(1, #items)]
+            bag[id] = (bag[id] or 0) + 1
+            setBag(ml, id, bag[id]); bagUpdate(ml)
+        elseif op <= 45 then                              -- an item leaves bags (retire)
+            local id = items[rng(1, #items)]
+            if (bag[id] or 0) > 0 then bag[id] = bag[id] - 1; setBag(ml, id, bag[id]); bagUpdate(ml) end
+        elseif op <= 60 then                              -- start a roll on a pending lot
+            local lot = pick(lotsByState({ pending = true }))
+            if lot then ml.addon:StartLiveRoll(lot.id) end
+        elseif op <= 84 then                              -- a player responds on an open lot
+            local lot = pick(lotsByState({ rolling = true, pending = true, idle = true, new = true }))
+            if lot then ml.addon:SetPlayerResponse(lot.id, players[rng(1, #players)], tiers[rng(1, #tiers)]) end
+        elseif op <= 94 then                              -- resolve a rolling lot
+            local lot = pick(lotsByState({ rolling = true }))
+            if lot then ml.addon:ResolveLiveRoll(lot.id) end
+        else                                              -- unlock all resolved lots
+            if #ml.addon.lootCore:Resolved() > 0 then ml.addon:UnlockAllRolls() end
+        end
+
+        flushWireTo(raider)                               -- deliver whatever deltas/snapshots resulted
+        flushWireTo(ml)                                   -- deliver any raider->ML traffic (resync requests)
+        flushWireTo(raider)                               -- and any snapshot that produced
+        if syncView(ml) ~= syncView(raider) then
+            mismatch = string.format("step %d (op=%d)\n--- ML ---\n%s\n--- raider ---\n%s",
+                step, op, syncView(ml), syncView(raider))
+            break
+        end
+    end
+    check(mismatch == nil, "raider matched ML at every step" .. (mismatch and ("\n" .. mismatch) or ""))
+end)
+
+test("delta sync: a dropped delta is detected via rev gap and auto-resynced", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local raider = makeWorld("Raidertwo", false)
+    startSession(ml)
+    setBag(ml, 40001, 1); bagUpdate(ml)
+    local lot = openLot(ml, 40001)
+    ml.addon:BroadcastSession(); flushWireTo(raider)      -- baseline; raider lastRev set
+    eq(syncView(raider), syncView(ml), "synced at baseline")
+
+    ml.addon:StartLiveRoll(lot.id)
+    clearWire()                                           -- DROP this delta (simulate a lost LOTD)
+    ml.addon:SetPlayerResponse(lot.id, "Alice", "ms")     -- next change -> a delta with a rev gap
+    flushWireTo(raider)                                   -- raider sees the gap, requests a full resync
+    check(raider.addon.comm.resyncPending == true, "raider flagged a resync after the gap")
+    flushWireTo(ml)                                       -- ML answers REQUEST_SESSION_SYNC with a snapshot
+    flushWireTo(raider)                                   -- raider applies it
+    eq(syncView(raider), syncView(ml), "raider converged to ML truth after gap + resync")
 end)
 
 -- ===========================================================================
@@ -683,6 +824,85 @@ test("guard: unlock + reroll retracts the owe and re-creates it for the new winn
     w.addon:ResolveLiveRoll(lotId)
     eq(owedCount(w), 1, "re-owed after reroll")
 end)
+
+-- ===========================================================================
+-- 25-man message-load report (opt-in: WLLOAD=1). Reveals the real outgoing message
+-- count/bytes of a full raid loot session WITHOUT testing in-game, by tallying the mocked
+-- wire and modelling ChatThrottleLib (MAX_CPS=800, 40B/msg overhead, 245B chunk size).
+-- ===========================================================================
+local function loadReport()
+    local PREFIX = "WeirdLoot"
+    local MAXLEN, CPS, OVERHEAD = 254 - #PREFIX, 800, 40
+
+    -- summarize WIRE (and clear it): logical msgs, physical chunks, CTL bytes, drain seconds.
+    local function drain(label)
+        local byCmd, byPrio = {}, { ALERT = 0, BULK = 0 }
+        local logical, chunks, bytes = 0, 0, 0
+        for _, m in ipairs(WIRE) do
+            local cmd = string.match(m.msg, "^[^|]+") or "?"
+            byCmd[cmd] = (byCmd[cmd] or 0) + 1
+            local prio = m.prio or "BULK"
+            byPrio[prio] = (byPrio[prio] or 0) + 1
+            local c = math.max(1, math.ceil(#m.msg / MAXLEN))
+            logical = logical + 1; chunks = chunks + c; bytes = bytes + #m.msg + c * OVERHEAD
+        end
+        WIRE = {}
+        return { label = label, logical = logical, chunks = chunks, bytes = bytes,
+                 secs = bytes / CPS, byCmd = byCmd, byPrio = byPrio }
+    end
+    local function line(r)
+        local parts = {}
+        for k, v in pairs(r.byCmd) do parts[#parts + 1] = k .. ":" .. v end
+        table.sort(parts)
+        return string.format("  %-22s %4d msg  %4d chunks  %6dB  %5.1fs drain  [A:%d B:%d]  %s",
+            r.label, r.logical, r.chunks, r.bytes, r.secs, r.byPrio.ALERT or 0, r.byPrio.BULK or 0, table.concat(parts, " "))
+    end
+
+    local ml = makeWorld("Masterlooter", true)
+    startSession(ml)
+    local attendees = {}
+    for i = 1, 25 do attendees[i] = { name = "Raider" .. i, className = "Warrior", specName = "Arms", status = "main" } end
+    ml.addon.session.attendees = attendees
+    ml.addon.GetAttendees = function() return attendees end
+
+    print("")
+    print("=== 25-man comm load report (delta sync) ===")
+
+    -- cost of ONE full snapshot at this roster size (the old per-change unit)
+    clearWire(); ml.addon:BroadcastSession()
+    print(line(drain("one full snapshot")))
+
+    -- representative single operations (delta path)
+    clearWire(); setBag(ml, 40001, 1); bagUpdate(ml)
+    print(line(drain("one fresh drop")))
+    local lot = openLot(ml, 40001)
+    clearWire(); ml.addon:StartLiveRoll(lot.id)
+    print(line(drain("one Start Roll")))
+    clearWire(); ml.addon:SetPlayerResponse(lot.id, "Raider5", "ms")
+    print(line(drain("one raider response")))
+    clearWire(); ml.addon:ResolveLiveRoll(lot.id)
+    print(line(drain("one resolve")))
+
+    -- a full session: 12 items (2 of them x2), each rolled by 12 of 25 raiders
+    clearWire()
+    local items = { 40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 40009, 40010, 40011, 40012 }
+    for idx, id in ipairs(items) do
+        local qty = (idx <= 2) and 2 or 1
+        setBag(ml, id, qty); bagUpdate(ml)
+        local lt = openLot(ml, id)
+        if lt then
+            ml.addon:StartLiveRoll(lt.id)
+            for r = 1, 12 do ml.addon:SetPlayerResponse(lt.id, "Raider" .. r, (r % 5 == 0) and "bis" or "ms") end
+            ml.addon:ResolveLiveRoll(lt.id)
+        end
+    end
+    local sess = drain("full session (12 items)")
+    print(line(sess))
+    print(string.format("  -> old model (full snapshot per change) would be ~%d state-changes x one-snapshot.",
+        12 * 3))
+    print("")
+end
+if os.getenv("WLLOAD") then loadReport() end
 
 -- ===========================================================================
 print("")

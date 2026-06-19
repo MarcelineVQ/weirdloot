@@ -85,13 +85,33 @@ function LootCore.New()
     self.handlers = {}   -- event name -> array of callbacks
     self._resolver = nil -- injected: function(lot) -> { winners = {orderedKeys}, ... }
     self._mlKey = nil    -- normalized key of the master looter
+    self.dirty = {}      -- set of lot ids changed since the last DrainDirty (drives delta sync)
     return self
+end
+
+-- Mark a lot id changed so the ML can broadcast just the delta instead of the whole ledger.
+function LootCore:markDirty(id) if id then self.dirty[id] = true end end
+
+-- Return the changed ids since the last call and clear the set. Order follows mint order so
+-- a delta applies in the same sequence the ML produced it.
+function LootCore:DrainDirty()
+    local ids = {}
+    for i = 1, #self.order do
+        if self.dirty[self.order[i]] then ids[#ids + 1] = self.order[i] end
+    end
+    self.dirty = {}
+    return ids
 end
 
 -- wipe the ledger (new/cleared session). Keeps wiring (resolver/ML) intact.
 function LootCore:Reset()
+    -- A reset wipes the ledger and restarts lot ids at L:1 (e.g. Start Session over an
+    -- existing one). Log it as a segment boundary so the trace checker knows ids legitimately
+    -- restart here and does not read the reused ids as duplicates.
+    self:log("reset")
     self.lots = {}
     self.order = {}
+    self.dirty = {}
     self.seq = 0
     self:emit("ledgerChanged")
 end
@@ -102,6 +122,16 @@ local function normName(s)
     return string.lower((string.gsub(s, "^%s*(.-)%s*$", "%1")))
 end
 function LootCore:SetResolver(fn) self._resolver = fn end
+-- Optional structured-trace sink. Default nil -> log() is a no-op, so the pure core and
+-- the out-of-game test harness are unaffected. Debug.lua wires this in-game to persist a
+-- machine-checkable trace of every command and transition (see tests/checklog.lua).
+function LootCore:SetLogger(fn) self._log = fn end
+-- Every lot transition routes through log() with the lot's id, so this is also where we queue
+-- the lot for delta sync. Runs regardless of whether a trace sink is attached.
+function LootCore:log(ev, data)
+    if data and data.id then self:markDirty(data.id) end
+    if self._log then self._log(ev, data) end
+end
 function LootCore:SetML(playerKey) self._mlKey = normName(playerKey) end
 function LootCore:IsML(playerKey) return self._mlKey ~= nil and normName(playerKey) == self._mlKey end
 
@@ -167,6 +197,7 @@ function LootCore:mint(itemId, count, fresh)
     }
     self.lots[lot.id] = lot
     self.order[#self.order + 1] = lot.id
+    self:log("mint", { id = lot.id, itemId = itemId, count = count, fresh = fresh and true or false, state = lot.state })
     self:emit("lotAdded", lot)
     return lot
 end
@@ -212,6 +243,7 @@ function LootCore:reconcileItem(itemId, want, fresh)
         if open and not open.awards then
             open.count = open.count + diff
             if fresh and open.state == STATE.SKIPPED then open.state = STATE.NEW end
+            self:log("grow", { id = open.id, itemId = itemId, by = diff, count = open.count, state = open.state })
         else
             self:mint(itemId, diff, fresh)
         end
@@ -228,6 +260,7 @@ end
 -- A rolling lot is mid-decision and is never touched.
 function LootCore:retireFromItem(itemId, n)
     local remaining = n
+    self:log("retire", { itemId = itemId, n = n })
 
     -- 1. shrink the open lot's pre-roll count
     local open = self:openLotForItem(itemId)
@@ -236,6 +269,7 @@ function LootCore:retireFromItem(itemId, n)
         open.count = open.count - take
         remaining = remaining - take
         if open.count <= 0 then open.removed = true end
+        self:log("shrink", { id = open.id, itemId = itemId, take = take, count = open.count, removed = open.removed and true or false })
     end
 
     -- 2. retire awards from resolved lots: no-winner (ML's own) before owed
@@ -245,19 +279,21 @@ function LootCore:retireFromItem(itemId, n)
         for _, lot in ipairs(lots) do
             if lot.awards then
                 for _, a in ipairs(lot.awards) do
-                    if awardIsLive(a) then live[#live + 1] = a end
+                    if awardIsLive(a) then live[#live + 1] = { a = a, id = lot.id } end
                 end
             end
         end
         table.sort(live, function(x, y)
-            local rx = x.state == AWARD.RESOLVED and 1 or 2
-            local ry = y.state == AWARD.RESOLVED and 1 or 2
+            local rx = x.a.state == AWARD.RESOLVED and 1 or 2
+            local ry = y.a.state == AWARD.RESOLVED and 1 or 2
             return rx < ry
         end)
         for i = 1, remaining do
-            local a = live[i]
-            if not a then break end
-            a.state = AWARD.REMOVED -- left bags, disposition unknown
+            local entry = live[i]
+            if not entry then break end
+            local prev = entry.a.state
+            entry.a.state = AWARD.REMOVED -- left bags, disposition unknown
+            self:log("remove", { id = entry.id, itemId = itemId, winner = entry.a.winner, from = prev })
         end
     end
 end
@@ -268,7 +304,9 @@ end
 function LootCore:Surface(id)
     local lot = self.lots[id]; if not lot then return false end
     if lot.state == STATE.NEW or lot.state == STATE.IDLE or lot.state == STATE.SKIPPED then
+        local from = lot.state
         lot.state = STATE.PENDING
+        self:log("surface", { id = id, from = from, to = STATE.PENDING })
         self:emit("ledgerChanged")
         return true
     end
@@ -279,6 +317,7 @@ function LootCore:Skip(id)
     local lot = self.lots[id]; if not lot then return false end
     if lot.state == STATE.PENDING then
         lot.state = STATE.SKIPPED
+        self:log("skip", { id = id, to = STATE.SKIPPED })
         self:emit("ledgerChanged")
         return true
     end
@@ -292,6 +331,7 @@ function LootCore:StartRoll(id)
         -- them). Responses are not cleared here: identity (a fresh lot per re-drop) and Unlock
         -- (which clears on re-roll) are what prevent stale responses, not clearing at start.
         lot.state = STATE.ROLLING
+        self:log("startRoll", { id = id, to = STATE.ROLLING })
         self:emit("ledgerChanged")
         return true
     end
@@ -302,6 +342,7 @@ function LootCore:Cancel(id)
     local lot = self.lots[id]; if not lot then return false end
     if lot.state == STATE.ROLLING then
         lot.state = STATE.PENDING
+        self:log("cancel", { id = id, to = STATE.PENDING })
         self:emit("ledgerChanged")
         return true
     end
@@ -311,9 +352,17 @@ end
 -- Record one player's response (opaque value; in the addon a tier string). Allowed on any
 -- non-resolved lot so the loot tab can pre-seed responses before a live roll begins.
 function LootCore:SetResponse(id, player, value)
-    local lot = self.lots[id]; if not lot then return false end
-    if lot.state == STATE.RESOLVED or lot.removed then return false end
+    local lot = self.lots[id]
+    if not lot then
+        self:log("response", { id = id, player = player, value = value, ok = false, reason = "nolot" })
+        return false
+    end
+    if lot.state == STATE.RESOLVED or lot.removed then
+        self:log("response", { id = id, player = player, value = value, ok = false, reason = "closed", state = lot.state })
+        return false
+    end
     lot.responses[player] = value
+    self:log("response", { id = id, player = player, value = value, ok = true, state = lot.state })
     return true
 end
 
@@ -345,6 +394,9 @@ function LootCore:Resolve(id)
         lot.awards[i] = award
     end
     lot.state = STATE.RESOLVED
+    local awardSnap = {}
+    for i, a in ipairs(lot.awards) do awardSnap[i] = { state = a.state, winner = a.winner } end
+    self:log("resolve", { id = id, itemId = lot.itemId, count = lot.count, awards = awardSnap })
     self:emit("lotResolved", lot)
     self:emit("ledgerChanged")
     return record
@@ -359,6 +411,7 @@ function LootCore:Unlock(id)
     for _, a in ipairs(lot.awards or {}) do
         if a.winner then priorWinners[#priorWinners + 1] = a.winner end
     end
+    self:log("unlock", { id = id, itemId = lot.itemId, priorWinners = priorWinners })
     local live = liveCount(lot)
     lot.state = STATE.IDLE
     lot.count = live > 0 and live or lot.count
@@ -385,6 +438,7 @@ function LootCore:MarkDelivered(id, awardIndex, recipient, when)
     a.state = AWARD.DELIVERED
     a.recipient = recipient or a.winner
     a.deliveredAt = when
+    self:log("deliver", { id = id, itemId = lot.itemId, recipient = a.recipient, awardIndex = awardIndex })
     self:emit("lotDelivered", lot, a)
     self:emit("ledgerChanged")
     return true
@@ -470,6 +524,7 @@ end
 function LootCore:ApplyRemote(snapshot)
     self.lots = {}
     self.order = {}
+    self.dirty = {}
     self.seq = snapshot and snapshot.seq or 0
     if snapshot and snapshot.lots then
         for i = 1, #snapshot.lots do
@@ -478,6 +533,18 @@ function LootCore:ApplyRemote(snapshot)
             self.order[#self.order + 1] = l.id
         end
     end
+    self:emit("ledgerChanged")
+end
+
+-- Apply one lot from a delta (raider mirror). Upserts by id, preserving mint order, and
+-- advances seq. Does not go through log()/markDirty -- inbound state is never re-broadcast.
+function LootCore:ApplyRemoteLot(lotData, seq)
+    if not lotData or not lotData.id then return end
+    if not self.lots[lotData.id] then
+        self.order[#self.order + 1] = lotData.id
+    end
+    self.lots[lotData.id] = deepcopy(lotData)
+    if seq and seq > (self.seq or 0) then self.seq = seq end
     self:emit("ledgerChanged")
 end
 

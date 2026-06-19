@@ -196,6 +196,11 @@ local function getLootItemInfoText(item)
     return note ~= "" and note or role
 end
 
+local function isPlayerAllowedForLootItem(item, playerName)
+    local lookupName = getLootItemLookupName(item)
+    return addon:IsPlayerAllowedForItem(lookupName, playerName)
+end
+
 local function createLabel(parent, text, anchor, relativeTo, relativePoint, offsetX, offsetY)
     local fontString = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     fontString:SetPoint(anchor, relativeTo, relativePoint, offsetX, offsetY)
@@ -278,6 +283,19 @@ end
 local function updateLootChoiceButtons(row, selectedChoice)
     for _, option in ipairs(RESPONSE_BUTTONS) do
         setLootChoiceButtonState(row.choiceButtons and row.choiceButtons[option.key], selectedChoice == option.key)
+    end
+end
+
+local function applyLootChoiceAvailability(row, isLocked, isAllowed)
+    for _, option in ipairs(RESPONSE_BUTTONS) do
+        local button = row.choiceButtons[option.key]
+        if isLocked then
+            button:Disable()
+        elseif not isAllowed and option.key ~= "pass" then
+            button:Disable()
+        else
+            button:Enable()
+        end
     end
 end
 
@@ -891,6 +909,10 @@ function addon:BuildLootTab()
                 end
 
                 local playerName = util:GetPlayerName("player")
+                if option.key ~= "pass" and not isPlayerAllowedForLootItem(row.item, playerName) then
+                    addon:Print("Your class cannot use that token. You may only pass.")
+                    return
+                end
                 -- SetPlayerResponse routes itself: the ML writes the core (snapshot syncs out),
                 -- a raider whispers the pick to the ML. No separate broadcast needed here.
                 if not addon:SetPlayerResponse(row.item.id, playerName, option.key) then
@@ -1543,16 +1565,9 @@ function addon:RefreshLootTab()
         local responseChoice = self:GetPlayerResponse(item.id, playerName)
         updateLootChoiceButtons(row, responseChoice)
         local locked = self:IsItemLocked(item.id)
+        local allowedForPlayer = isPlayerAllowedForLootItem(item, playerName)
         row.icon:SetDesaturated(locked)        -- grey out the item icon once it's been rolled out
-        if locked then
-            for _, option in ipairs(RESPONSE_BUTTONS) do
-                row.choiceButtons[option.key]:Disable()
-            end
-        else
-            for _, option in ipairs(RESPONSE_BUTTONS) do
-                row.choiceButtons[option.key]:Enable()
-            end
-        end
+        applyLootChoiceAvailability(row, locked, allowedForPlayer)
         local typeText, slotText = getLootItemColumns(item.link)
         row.itemType:SetText(typeText)
         row.itemSlot:SetText(slotText)

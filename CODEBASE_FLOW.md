@@ -1,8 +1,8 @@
-# WeirdLoot codebase flow and consolidation map
+# WeirdLoot codebase flow
 
-Diagram of how the addon is wired today, the coupling that causes the recurring loot
-bugs, and exactly what collapses when `LootCore` lands. Line refs are evidence, not
-guesses (verified 2026-06-18).
+How the addon is wired now that `LootCore` is integrated: the core owns loot truth and
+every other module is a consumer. Names and API are read from source, not guessed
+(verified 2026-06-19, branch `feature/lootcore`).
 
 ---
 
@@ -26,141 +26,120 @@ flowchart TD
     Core -->|RefreshAll| UI
 ```
 
-`Core.lua:572` BAG_UPDATE is the single hinge: all loot enters the model only through
-the bag, on purpose. AutoLoot never feeds the model directly.
+`BAG_UPDATE` is the single hinge: all loot enters the model only through the bag, on
+purpose. AutoLoot never feeds the model directly. Only the ML reconciles bag reality
+into the ledger; raiders mirror via the snapshot.
 
 ---
 
-## 2. The loot lifecycle today
+## 2. The core: one owner of loot truth
 
-```mermaid
-flowchart LR
-    A[AutoLoot.LOOT_OPENED\nroutes to ML bags] --> B[BAG_UPDATE]
-    B --> C[Session.OnBagUpdate\nBuildTradeableEpicCounts]
-    C --> D[Session.BuildSessionItemList\n-> session.items]
-    D --> E[LiveRoll.AutoRollAddedItems\nShowPendingPopup]
-    E --> F[StartLiveRoll\nDROP broadcast]
-    F --> G[RegisterInterest\n-> session.responses]
-    G --> H[ResolveLiveRoll\n-> Resolver.ResolveSessionItem]
-    H --> I[results record\nWIN broadcast]
-    I --> J[OwePayout / payout:Owe]
-    J --> K[TradeDeliver.Engine\ndeliver + clear]
+`LootCore` (`LootCore.lua`) is pure Lua, no WoW globals, loaded right after `Core.lua`.
+Its entity is the **Lot**:
+
+```
+Lot = { id = "L:<seq>", itemId, state, count,
+        responses = { playerKey = tier },   -- group roll, one per lot
+        awards     = { ... },               -- per-copy disposition, frozen at resolve
+        record }                            -- the rendered result row
 ```
 
-Parallel to the live-roll path, the **loot tab** lets the ML set responses directly
-(`Session.SetPlayerResponse`) and resolve from the table. Upstream recently unified
-these two response surfaces; we still carry both.
+- **Identity is the numeric `itemId`**, never the link or name (those vary by client
+  locale). Two links that share an itemId (random-suffix variants) collapse to one lot.
+- **The lot id `L:<seq>` is the canonical id everywhere**: roll id, projection
+  `item.id`, response key, and wire id are all the same string.
+- **Distribution is one roll, top-N winners.** The lot holds a single `responses` table;
+  `Resolve` orders the winners and maps them onto per-copy `awards` underneath.
+
+Lot lifecycle (`STATE`): `new` -> `idle` -> `pending` -> `rolling` -> `resolved`, with
+`skipped` as a snooze that resurfaces next pass. Per-copy award disposition (`AWARD`):
+`owed` (won by a non-ML player, awaiting delivery), `resolved` (self-win or no-winner,
+ML already holds it), `delivered` (terminal, traded and recorded), `removed` (terminal,
+left bags with no delivery reported).
 
 ---
 
-## 3. The coupling problem (why bugs recur)
+## 3. The loot lifecycle today
 
-Four mutable state blobs have **no single owner**. Each is read and written by five
-modules, so any one can drift the others out of sync. This bipartite graph is the whole
-problem in one picture: every crossing line is a way for state to disagree.
-
-```mermaid
-flowchart LR
-    subgraph Modules
-      S[Session]
-      C[Comm]
-      R[Resolver]
-      L[LiveRoll]
-      U[UI]
-    end
-    subgraph SharedState [Shared mutable state, no owner]
-      items[(session.items\n+ GetItemById)]
-      resp[(session.responses)]
-      locks[(lockedItems\nIsItemLocked)]
-      res[(results)]
-    end
-    S --- items & resp & locks & res
-    C --- items & resp & locks & res
-    R --- items & resp & locks & res
-    L --- items & resp & locks & res
-    U --- items & resp & locks & res
-```
-
-On top of that, **identity is done by link in two places**, which is the literal
-stale-roll bug:
-
-| Site | Code | Problem |
-|------|------|---------|
-| `LiveRoll.lua:872` | `it.id == roll.itemId or it.link == roll.link` | resolve can read a different copy's rolls |
-| `LiveRoll.lua:674` | `HasOpenRollForLink` | "is this link rolling" instead of "is this copy rolling" |
-| `LiveRoll.lua:686` | `HasOpenPendingForLink` | same, for pending popups |
-| `UI.lua:973,987` | `selfRow.item.link` matching | UI row actions keyed by link |
-
-And there are **two independent paths into the owe ledger**:
-
-| Path | Code |
-|------|------|
-| table-resolve | `Resolver.lua:803` -> `OwePayout(results)` |
-| live-roll | `LiveRoll.lua:834` -> `self.payout:Owe(...)` directly |
-
-Plus a **broadcast storm**: Comm syncs state as five separate message types
-(`BroadcastSession`, `BroadcastSessionLocks`, `BroadcastResults`,
-`BroadcastSelectionState`, `BroadcastNamedItems`), which floods the throttle and gives
-the raider mirror multiple incremental ways to drift.
-
----
-
-## 4. After LootCore
-
-`LootCore` becomes the single owner of identity, lifecycle, per-copy rolls, and
-disposition. Every module reaches the loot model through one door: a query or a command,
-keyed by stable copy id. Nothing keeps its own copy of loot state.
+Every module reaches the model through one door: a query, a command, or an event. No
+module keeps its own copy of loot state.
 
 ```mermaid
 flowchart TD
-    AutoLoot -->|loot into bags| BAG_UPDATE
+    AutoLoot -->|loot into ML bags| BAG_UPDATE
     BAG_UPDATE --> Session
-    Session -->|Reconcile counts+freshLinks| CORE
+    Session -->|Reconcile eligible+fresh\nkeyed by itemId| CORE
 
-    LiveRoll -->|Surface / StartRoll / RecordRoll| CORE
-    UI -->|reads List / State| CORE
+    LiveRoll -->|Surface / StartRoll / SetResponse / Resolve / Cancel| CORE
+    UI -->|reads List / Resolved / State| CORE
     Comm -->|Serialize out / ApplyRemote in| CORE
 
-    CORE -->|copyAdded| LiveRoll
-    CORE -->|ledgerChanged| UI
-    CORE -->|Resolve delegates one copy's rolls| Resolver
-    Resolver -->|winner| CORE
-    CORE -->|copyResolved winner+itemId| Payout
+    CORE -->|lotAdded| LiveRoll
+    CORE -->|ledgerChanged| Session
+    CORE -->|Resolve delegates one lot's responses| Resolver
+    Resolver -->|winners| CORE
+    CORE -->|lotResolved owe / lotUnlocked forgive| Payout
     Payout --> TradeDeliver
-    TradeDeliver -->|MarkDelivered| CORE
+    TradeDeliver -->|onDelivered -> MarkDeliveredFor| CORE
 
     subgraph CORE [LootCore: the single door]
-      ledger[(ledger: id -> LootCopy\nstate machine\nper-copy rolls\ndisposition log)]
+      ledger[(lots: id -> Lot\nstate machine\ntop-N awards\ndisposition)]
     end
 ```
 
-The five-way shared-state mesh in section 3 collapses to this hub-and-spoke: Session
-feeds counts in, everyone else reads projections or issues commands by id, and the bag
-can no longer be matched by link anywhere.
+The wiring, concretely:
+
+| Edge | Code |
+|------|------|
+| bag -> core | `Session:OnBagUpdate` -> `Reconcile(ItemIdCounts(BuildTradeableEpicCounts()), fresh)` |
+| core -> projections | `core:On("ledgerChanged")` -> `Session:RebuildLootProjections` (rebuilds `session.items`/`results`), refresh UI, ML auto-broadcasts snapshot |
+| core -> live popups | `core:On("lotAdded")` -> `LiveRoll:OnLotAdded`; `ledgerChanged` -> `SyncPendingPopups` |
+| resolve | `core:Resolve(id)` delegates to `Resolver:ResolveSessionItem(lot)` via `SetResolver`, freezes ordered winners onto awards, emits `lotResolved` |
+| owe / forgive | `core:On("lotResolved")` -> `Payout:OnLotResolvedPayout` (Owe); `lotUnlocked` -> `OnLotUnlockedPayout` (Forgive) |
+| delivery | `TradeDeliver` `onDelivered` -> `core:MarkDeliveredFor(player, itemId)` records the per-copy disposition |
+| sync | `Comm:BroadcastSession` -> `core:Serialize`; receive -> `core:ApplyRemote` (carries itemId so each client localizes) |
+
+`session.items` and `session.results` are **projections** rebuilt from the core on every
+`ledgerChanged`, on both the ML (after Reconcile/Resolve) and raiders (after
+ApplyRemote). One code path renders both; nobody mutates them as independent state.
 
 ---
 
-## 5. Consolidation opportunities
+## 4. Core API surface
 
-Ranked by payoff. Items 1 to 3 are the bug fixes; 4 to 6 are cleanup the core enables.
+| Group | Methods |
+|-------|---------|
+| reconcile | `Reconcile(eligible, freshLinks)` (ML only), `Reset` |
+| lifecycle | `Surface(id)`, `Skip(id)`, `StartRoll(id)`, `Cancel(id)`, `Resolve(id)`, `Unlock(id)`, `UnlockAll()` |
+| responses | `SetResponse(id, player, value)`, `GetResponse(id, player)` |
+| delivery | `MarkDelivered(id, awardIndex, recipient, when)`, `MarkDeliveredFor(player, itemId, when)` |
+| queries | `Get(id)`, `State(id)`, `IsResolved(id)`, `LiveCount(id)`, `Surfaceable()`, `List()`, `Resolved()`, `All()`, `Log()` |
+| sync | `Serialize()`, `ApplyRemote(snapshot)` |
+| wiring | `On(event, handler)`, `SetResolver(fn)`, `SetML(playerKey)`, `IsML(playerKey)` |
+| events | `ledgerChanged`, `lotAdded`, `lotResolved`, `lotUnlocked`, `lotDelivered` |
+| self-test | `RunSelfChecks(verbose)` |
 
-| # | Today (scattered) | Consolidates into | Kills |
-|---|---|---|---|
-| 1 | `session.items` + `responses` + `lockedItems` + `results`, each touched by 5 modules | one `LootCore` ledger keyed by stable id | cross-module drift, the whole class of "which copy / whose state" bugs |
-| 2 | by-link lookups at `LiveRoll:674,686,872`, `UI:973,987` | id-only queries (`core:State(id)`, `core:Surfaceable()`) | stale-roll re-kill bug by construction |
-| 3 | two owe paths (`Resolver:803`, `LiveRoll:834`) | one `copyResolved` event -> Payout | divergent owe accounting, double/missed owes |
-| 4 | 5 Comm broadcast types for state | one `Serialize` snapshot + `ApplyRemote` | throttle flooding, incremental raider-mirror drift |
-| 5 | dual response surfaces (loot-tab `SetPlayerResponse` vs live-roll `RegisterInterest`) | `core:RecordRoll(id, ...)` only | two response stores that can disagree (what upstream just patched around) |
-| 6 | no disposition record anywhere | `delivered` / `removed` transitions + `core:Log()` | the missing "where did it go" audit trail |
+Resolver still owns winner-picking (bracket -> named -> spec -> status -> roll, top-N by
+count); the core only hands it one lot's responses. TradeDeliver still owns the trade
+engine; the core only records the `MarkDeliveredFor` result. Roster/Config own roster +
+rules; Util/ItemInfo stay utility modules.
 
-### Stays as-is (correct boundaries, do not fold in)
-- **Resolver** owns winner-picking (already correct); core only hands it one copy's rolls.
-- **TradeDeliver** owns the trade engine; core only records the `MarkDelivered` result.
-- **Roster / Config** own roster + rules; core stays free of them.
-- **Util / ItemInfo** stay utility modules.
+---
 
-### The one open seam (decide before migrating, not before building)
-`Resolver.ResolveSessionItem` (`Resolver.lua:525`) does not read `copy.rolls`. It calls
-`BuildRollerList(item.id)` (`Resolver.lua:7`) and pulls rolls from `session.responses[id]`.
-So either the core's copy `id` becomes the `responses` key, or `BuildRollerList` is
-refactored to accept a rolls table. Step 1 (standalone core) does not need this answered.
+## 5. Validation and known gaps
+
+- **Out-of-game battery**: `tests/run.lua` (84 checks) loads the real addon into a mocked
+  WoW env. Run `luajit tests/run.lua`. Currently 84 passed, 0 failed. Plus
+  `LootCore.RunSelfChecks` (31 pure-core checks).
+- **In-game**: not yet exercised; the frame/event wiring and trade engine run under UI
+  the harness mocks.
+- **Known race** (failing-by-design test "KNOWN RACE: ..."): if `BAG_UPDATE` reconciles a
+  traded item as gone before TradeDeliver's trade-complete callback, the copy is recorded
+  `removed`, not `delivered`. Tighten later.
+- **Deferred from the upstream merge**: upstream's live-roll *popup* polish (class-gate in
+  the popup, on-card roll lines, class-colored names, cross-client roll-value sync,
+  sort-by-roll) was not carried into the LiveRoll collision; the core was kept as the
+  foundation and these re-apply onto the lot model later. Gate-tokens-by-class is already
+  live in the Loot tab and batch resolution.
+</content>
+</invoke>

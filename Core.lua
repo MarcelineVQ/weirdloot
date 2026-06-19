@@ -452,6 +452,7 @@ function addon:PLAYER_LOGIN()
         math.randomseed(time() + guidSeed)
     end
 
+    if self.InitializeDebug then self:InitializeDebug() end  -- wire the core trace sink before anything touches the ledger (optional module)
     self:InitializeConfig()
     self:InitializeRoster()
     self:InitializeSession()
@@ -605,6 +606,9 @@ function addon:HandleSlashCommand(msg)
             and "ON - every item in your bags counts as session loot (city testing)."
             or "OFF - only tradable epics count."))
         self:RefreshSessionItems(true)
+    elseif command == "debug" or string.sub(command, 1, 6) == "debug " then
+        local rest = string.match(string.trim(msg or ""), "^%S+%s*(.*)$")
+        self:HandleDebugCommand(rest)
     elseif command == "autoroll" then
         self.db.autoRoll = not self.db.autoRoll
         self:Print("Auto-roll on new loot " .. (self.db.autoRoll and "ON." or "OFF (right-click an item to roll manually)."))
