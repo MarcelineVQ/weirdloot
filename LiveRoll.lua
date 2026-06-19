@@ -541,7 +541,7 @@ function addon:ShowInterestPopup(roll, slot)
     roll.popup = f
     f.mode = "interest"
 
-    roll.choice = nil
+    local currentChoice = roll.choice
     f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = roll.link
     f.name:SetText(formatRollItemLabel(roll.link, roll.name, roll.quantity))
@@ -558,6 +558,9 @@ function addon:ShowInterestPopup(roll, slot)
     resetInterestButtons(f)
     positionInterestButtons(f, roll.owner)
     applyInterestButtonAvailability(self, f, roll)
+    if currentChoice then
+        highlightInterestButton(f, currentChoice)
+    end
 
     if roll.owner then
         -- the ML keeps the popup to drive the roll: Cancel aborts, Roll! resolves
@@ -1079,7 +1082,12 @@ function addon:StartLiveRoll(item, slot)
     self.live.rolls[rollId] = roll
 
     self:SendLargeMessage("DROP",
-        { rollId, item.link, item.name or "", item.icon or "", prio or "", tostring(ROLL_DURATION), tostring(item.quantity or 1) }, "RAID")
+        { rollId, item.link, item.name or "", item.icon or "", prio or "", tostring(ROLL_DURATION), tostring(item.quantity or 1), item.id or "" }, "RAID")
+    for _, registrant in pairs(roll.registrants or {}) do
+        if registrant.tier and registrant.tier ~= "pass" then
+            self:BroadcastLiveRollState(rollId, registrant.name, registrant.className, registrant.tier, registrant.roll)
+        end
+    end
     self:ShowInterestPopup(roll, slot)
     self:TriggerCallback("SESSION_UPDATED")
     self:Print("Put " .. (item.name or item.link) .. " up for roll. Press Roll! when ready.")
@@ -1306,8 +1314,15 @@ function addon:OnDropMessage(fields)
         prio = fields[5] or "",
         duration = tonumber(fields[6]) or ROLL_DURATION,
         quantity = tonumber(fields[7]) or 1,
+        itemId = (fields[8] ~= "" and fields[8]) or nil,
         owner = false, registrants = {}, resolved = false,
     }
+    if roll.itemId then
+        local myChoice = self:GetPlayerResponse(roll.itemId, util:GetPlayerName("player"))
+        if myChoice and myChoice ~= "" then
+            roll.choice = myChoice
+        end
+    end
     self.live.rolls[roll.id] = roll
     self:ShowInterestPopup(roll)
     self:TriggerCallback("SESSION_UPDATED")
