@@ -660,6 +660,30 @@ test("delta fuzz: a delta-synced raider always equals the ML across random opera
     check(mismatch == nil, "raider matched ML at every step" .. (mismatch and ("\n" .. mismatch) or ""))
 end)
 
+test("rejoin mid-roll: raider restores the roll popup with the ML's remaining time", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local raider = makeWorld("Raidertwo", false)
+    startSession(ml)
+    setBag(ml, 40005, 1); bagUpdate(ml)
+    local lot = openLot(ml, 40005)
+    ml.addon:StartLiveRoll(lot.id)                 -- ML rolls; deadline = now + 20s
+    local mlRoll = ml.addon.live.rolls[lot.id]
+    check(mlRoll and mlRoll.deadline, "ML recorded a roll deadline")
+
+    CLOCK = CLOCK + 6                              -- 6s elapse on the ML's roll (14s left)
+    clearWire()
+    ml.addon:BroadcastSession()                   -- a freshly-reloaded raider pulls the full snapshot
+    flushWireTo(raider)
+
+    local rr = raider.addon.live.rolls[lot.id]
+    check(rr ~= nil, "raider restored a roll record for the rolling lot")
+    check(raider.addon:HasOpenRollForLot(lot.id), "raider has an open roll popup")
+    local remaining = rr and rr.deadline and (rr.deadline - CLOCK) or nil
+    check(remaining ~= nil and remaining >= 13.5 and remaining <= 14.5,
+        "restored countdown reflects the ML's remaining ~14s, not a fresh 20s (got " .. tostring(remaining) .. ")")
+end)
+
 test("a raider requesting sync from a session-less ML gets no phantom session", function()
     clearWire()
     local ml = makeWorld("Masterlooter", true)        -- authorized ML, but no session started

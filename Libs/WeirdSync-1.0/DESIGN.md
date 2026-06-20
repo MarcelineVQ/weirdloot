@@ -162,6 +162,10 @@ re-whispers `RQ` on exponential backoff up to `maxAttempts`, then logs a `give-u
 surfaces it. This single mechanism covers **both** a dropped request and a dropped response,
 because in either case the peer is left waiting and re-asks.
 
+A `reqId` is `<me>:<nonce>.<seq>`. The nonce is fixed per channel instance, so it differs across
+reloads (a fresh channel resets `seq` to 1); without it two reload lifetimes would both mint
+`<me>:1` and a stale ack from the prior life could clear the new request's `outstanding` entry.
+
 ### 7.2 Targeted-send ack (authority side: "I sent it, did it land?")
 
 When the authority answers an `RQ` from peer P, it whispers the snapshot to **P only** with

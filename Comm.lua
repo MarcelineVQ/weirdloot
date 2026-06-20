@@ -30,10 +30,22 @@ local function lotLine(self, lot)
 end
 
 local function decodeLotLine(self, f)
-    -- strip the "L" tag -> the original EncodeLot array (field 1 sessionId, 2 id, ... 9 seq)
+    -- strip the "L" tag -> the original EncodeLot array (field 1 sessionId, 2 id, ... 9 seq, 10 remaining)
     local lotFields = {}
     for i = 2, #f do lotFields[#lotFields + 1] = f[i] end
-    return self:DecodeLot(lotFields), tonumber(lotFields[9]) or 0
+    return self:DecodeLot(lotFields), tonumber(lotFields[9]) or 0, tonumber(lotFields[10])
+end
+
+-- Stash the ML's roll countdown for a lot so the raider's roll-popup restore (SyncRollPopups, run
+-- on ledgerChanged) can show the true remaining time. Must be set BEFORE the apply that emits
+-- ledgerChanged. Kept off the core lot to keep the core free of UI/timing state.
+function addon:StashRollRemaining(lot, remaining)
+    self._rollRemaining = self._rollRemaining or {}
+    if lot.state == self.lootCore.STATE.ROLLING and remaining then
+        self._rollRemaining[lot.id] = remaining
+    else
+        self._rollRemaining[lot.id] = nil
+    end
 end
 
 function addon:InitializeComm()
@@ -132,8 +144,18 @@ local function renderRemoteRecord(lotId, itemId, count, winners)
     }
 end
 
+-- Seconds left on a rolling lot's countdown, from the ML's authoritative roll deadline. Sent so a
+-- raider restoring a roll popup shows the true time remaining (the ML closes it at the real end),
+-- not a fresh full duration. "" for non-rolling lots or when no deadline is known.
+function addon:RollRemaining(lot)
+    if lot.state ~= self.lootCore.STATE.ROLLING then return "" end
+    local roll = self.live and self.live.rolls and self.live.rolls[lot.id]
+    if not roll or not roll.deadline then return "" end
+    return tostring(math.max(0, roll.deadline - ((GetTime and GetTime()) or 0)))
+end
+
 -- Structured-only encoding of one lot for the wire (shared by the full snapshot and deltas):
--- ids + state + live count + responses + winner NAMES + a removed flag. No text, no links.
+-- ids + state + live count + responses + winner NAMES + a removed flag + roll remaining. No text.
 function addon:EncodeLot(lot)
     local winners = {}
     for _, a in ipairs(lot.awards or {}) do
@@ -148,7 +170,8 @@ function addon:EncodeLot(lot)
         encodeResponses(lot.responses),
         table.concat(winners, ","),
         lot.removed and "1" or "",
-        tostring(self.lootCore.seq or 0),   -- field 9: core seq (used by LOTD deltas; ignored in a full snapshot)
+        tostring(self.lootCore.seq or 0),   -- field 9: core seq (used by deltas; ignored in a full snapshot)
+        self:RollRemaining(lot),            -- field 10: roll countdown seconds (rolling lots only)
     }
 end
 
@@ -211,9 +234,10 @@ function addon:SyncApplySnapshot(lines, epoch)
                 name = f[2], className = f[3], specName = f[4], status = f[5],
             }
         elseif tag == "L" then
-            local lot, lotSeq = decodeLotLine(self, f)
+            local lot, lotSeq, remaining = decodeLotLine(self, f)
             lots[#lots + 1] = lot
             seq = math.max(seq, lotSeq)
+            self:StashRollRemaining(lot, remaining)   -- before ApplyRemote -> ledgerChanged -> SyncRollPopups
         end
     end
     self.lootCore:ApplyRemote({ seq = seq, lots = lots })
@@ -222,7 +246,8 @@ end
 -- Host delta applier (raider): one lot upsert.
 function addon:SyncApplyLine(fields)
     if fields[1] ~= "L" then return end
-    local lot, lotSeq = decodeLotLine(self, fields)
+    local lot, lotSeq, remaining = decodeLotLine(self, fields)
+    self:StashRollRemaining(lot, remaining)   -- before ApplyRemoteLot -> ledgerChanged -> SyncRollPopups
     self.lootCore:ApplyRemoteLot(lot, lotSeq)
 end
 

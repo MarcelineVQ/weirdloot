@@ -1,6 +1,8 @@
 local addon = WeirdLoot
 local util = addon.util
 
+local ROLL_DURATION = 20        -- seconds raiders have to roll before it auto-resolves
+
 -- Live rolling system, coexisting with the batch flow.
 --
 -- Flow: a newly-collected item surfaces a *pending* popup to the loot master only
@@ -48,7 +50,7 @@ function addon:InitializeLiveRoll()
     if self.lootCore and not self._liveRollWired then
         self._liveRollWired = true
         self.lootCore:On("lotAdded", function(lot) self:OnLotAdded(lot) end)
-        self.lootCore:On("ledgerChanged", function() self:SyncPendingPopups() end)
+        self.lootCore:On("ledgerChanged", function() self:SyncPendingPopups(); self:SyncRollPopups() end)
     end
 end
 
@@ -80,6 +82,49 @@ function addon:SyncPendingPopups()
     end
 end
 
+-- Raider-side restore: the roll popup is normally created by the transient DROP message, which a
+-- reloading raider misses. Reconcile against the core: show a roll popup for every ROLLING lot we
+-- have no open roll for (rebuilt from the synced lot + the ML's remaining time), and close roll
+-- popups whose lot has left ROLLING (resolved/cancelled/gone). The ML drives its own roll popups
+-- via StartLiveRoll, so this is raider-only.
+function addon:SyncRollPopups()
+    if self:IsAuthorizedLootMaster() then return end
+    local core = self.lootCore
+    for _, lot in ipairs(core:List()) do
+        if lot.state == core.STATE.ROLLING and not self:HasOpenRollForLot(lot.id) then
+            self:RestoreRollPopup(lot)
+        end
+    end
+    for i = #self.live.active, 1, -1 do
+        local f = self.live.active[i]
+        if f.mode == "interest" and f.rollId and core:State(f.rollId) ~= core.STATE.ROLLING then
+            if self.live.rolls then self.live.rolls[f.rollId] = nil end
+            self:ClosePendingFrame(f)
+        end
+    end
+end
+
+-- Reconstruct a roll record from a synced lot and re-show its popup. The remaining seconds the ML
+-- stamped on the lot (stashed by Comm at decode) give an honest deadline; without one we fall back
+-- to the full duration. Existing picks (from lot.responses) are reflected so the popup is accurate.
+function addon:RestoreRollPopup(lot)
+    local name, link, icon = util:ItemRender(lot.itemId)
+    local remaining = (self._rollRemaining and self._rollRemaining[lot.id]) or ROLL_DURATION
+    local roll = {
+        id = lot.id, itemId = lot.itemId, link = link,
+        name = name or link or ("item:" .. tostring(lot.itemId)),
+        icon = icon, prio = "", owner = false, registrants = {}, resolved = false,
+        quantity = lot.count or 1,
+        duration = ROLL_DURATION,
+        deadline = GetTime() + remaining,
+    }
+    for playerKey, tier in pairs(lot.responses or {}) do
+        roll.registrants[util:NormalizeKey(playerKey)] = { name = playerKey, tier = tier }
+    end
+    self.live.rolls[lot.id] = roll
+    self:ShowInterestPopup(roll)
+end
+
 function addon:HasOpenPendingForLot(lotId)
     for _, f in ipairs(self.live.active) do
         if f.mode == "pending" and f.lotId == lotId then return true end
@@ -96,7 +141,6 @@ end
 -- popup frames (custom, stacking)
 -- ---------------------------------------------------------------------------
 local POPUP_W, POPUP_H = 340, 94
-local ROLL_DURATION = 20        -- seconds raiders have to roll before it auto-resolves
 local popupBasePoint, savePopupBasePoint, layoutPopups
 
 local function makeButton(parent, text, width)
@@ -522,6 +566,14 @@ end
 -- interest popup
 -- ---------------------------------------------------------------------------
 function addon:ShowInterestPopup(roll)
+    -- Idempotent per lot: replace any existing interest popup for this roll so a DROP and a
+    -- restore (in either order) never stack two popups for the same item.
+    for i = #self.live.active, 1, -1 do
+        local f = self.live.active[i]
+        if f.mode == "interest" and f.rollId == roll.id then
+            self:ClosePendingFrame(f)
+        end
+    end
     local f = acquirePopup(self)
     f.roll = roll
     roll.popup = f
@@ -572,14 +624,17 @@ function addon:ShowInterestPopup(roll)
     f.rollId = roll.id
     f.isOwner = roll.owner
     f.duration = roll.duration or ROLL_DURATION
-    f.elapsed = 0
+    -- Deadline-based, not elapsed-accumulation: the bar tracks the ML's authoritative end time
+    -- (reconstructed locally as now + the remaining seconds the ML sent), so a popup restored
+    -- mid-roll shows the true time left and the ML still closes it at the real deadline.
+    f.deadline = roll.deadline or (GetTime() + f.duration)
     f:SetScript("OnUpdate", function(bar, dt)
-        bar.elapsed = bar.elapsed + dt
-        local frac = 1 - (bar.elapsed / bar.duration)
-        if frac < 0 then frac = 0 end
+        local remaining = bar.deadline - GetTime()
+        local frac = remaining / bar.duration
+        if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
         bar.timer:SetValue(frac)
         bar.timer:SetStatusBarColor(1 - frac, frac, 0.1)   -- green -> red as it drains
-        if bar.elapsed >= bar.duration then
+        if remaining <= 0 then
             bar:SetScript("OnUpdate", nil)
             if bar.isOwner then addon:ResolveLiveRoll(bar.rollId) end
         end
@@ -856,10 +911,12 @@ function addon:StartLiveRoll(lotId)
         id = lotId, itemId = lot.itemId, link = link, name = name,
         icon = icon, prio = prio, owner = true, registrants = {}, resolved = false,
         duration = ROLL_DURATION, quantity = quantity,
+        deadline = GetTime() + ROLL_DURATION,   -- authoritative end; sync carries the remaining
     }
     self.live.rolls[lotId] = roll
 
-    -- the wire carries the itemId (not a link): every client renders its own localized name
+    -- the wire carries the itemId (not a link): every client renders its own localized name.
+    -- field 4 is the REMAINING seconds (full duration at start); a client sets deadline = now + it.
     self:SendLargeMessage("DROP",
         { lotId, tostring(lot.itemId), prio or "", tostring(ROLL_DURATION), tostring(quantity) }, "RAID", nil, "ALERT")
     self:ShowInterestPopup(roll)
@@ -1025,7 +1082,8 @@ function addon:OnDropMessage(fields)
         name = name or link or ("item:" .. tostring(itemId)),
         icon = icon,
         prio = fields[3] or "",
-        duration = tonumber(fields[4]) or ROLL_DURATION,
+        duration = ROLL_DURATION,
+        deadline = GetTime() + (tonumber(fields[4]) or ROLL_DURATION),   -- field 4 = remaining seconds
         quantity = tonumber(fields[5]) or 1,
         owner = false, registrants = {}, resolved = false,
     }

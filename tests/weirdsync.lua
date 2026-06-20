@@ -373,6 +373,22 @@ test("request with no authority is a no-op and the lib never polls for one", fun
     eq(view(rd), view(ml), "peer converged")
 end)
 
+test("reqIds stay unique across channel lifetimes (reload) via the nonce", function()
+    reset()
+    local function freshRaider(nonce)
+        return WeirdSync:NewChannel("WST", {
+            selfName = "Raider", nonce = nonce,
+            isAuthority = function() return false end,
+            authorityName = function() return "ML" end,
+        })
+    end
+    local a = freshRaider("100"); a:RequestSync()
+    local b = freshRaider("200"); b:RequestSync()   -- a "reload": reqSeq resets to 1, nonce differs
+    local idA, idB = a.pendingRequest.reqId, b.pendingRequest.reqId
+    check(idA ~= idB, "two lifetimes mint distinct reqIds (got " .. tostring(idA) .. " vs " .. tostring(idB) .. ")")
+    check(idA == "Raider:100.1" and idB == "Raider:200.1", "reqId embeds nonce + per-life seq")
+end)
+
 test("zone-in triggers a sync request", function()
     reset()
     local ml = makeHost("ML", true)

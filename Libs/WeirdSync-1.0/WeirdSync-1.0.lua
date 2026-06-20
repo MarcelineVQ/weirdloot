@@ -126,7 +126,10 @@ end
 -- internal: mint and send a request to a known authority, marking it in-flight for Tick.
 function Channel:_sendRequest(auth)
     self.reqSeq = (self.reqSeq or 0) + 1
-    local reqId = self.me .. ":" .. self.reqSeq
+    -- reqId carries the per-channel nonce so it stays unique across reloads: a fresh channel
+    -- resets reqSeq to 1, so without the nonce two reload lifetimes would both mint "<me>:1" and a
+    -- stale ack from the prior life could clear the new request's outstanding entry.
+    local reqId = self.me .. ":" .. self.nonce .. "." .. self.reqSeq
     self.pendingRequest = { reqId = reqId, attempts = 1, nextAttempt = now() + self:_backoff(1) }
     self:_send({ "RQ", self.me, reqId }, "WHISPER", auth, "NORMAL")
     self.cb.log("req", { reqId = reqId, attempt = 1 })
@@ -299,6 +302,9 @@ function WeirdSync:NewChannel(prefix, cb)
     ch._pending = {}        -- authority: queued changed lines awaiting Broadcast
     ch.reqSeq = 0
     ch.me = cb.selfName or (UnitName and UnitName("player")) or "?"
+    -- per-channel-instance nonce so reqIds are unique across reloads (GetTime keeps climbing
+    -- across a /reload, so each channel lifetime gets a distinct value). Injectable for tests.
+    ch.nonce = cb.nonce or tostring(math.floor(now()))
 
     -- transport: register our prefix with AceComm and route inbound to OnReceive.
     local Comm = LibStub("AceComm-3.0", true)
