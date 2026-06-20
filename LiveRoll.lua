@@ -181,11 +181,14 @@ local function interestButtons(f)
     return { bis = f.bisBtn, ms = f.msBtn, mu = f.muBtn, os = f.osBtn, tm = f.tmBtn, pass = f.passBtn }
 end
 -- chosen button: bold (outlined) green label; others: normal gold label
-local function styleButtonText(btn, chosen)
+local function styleButtonText(btn, chosen, disabled)
     local fs = btn:GetFontString()
     if not fs then return end
     local font, size = fs:GetFont()
-    if chosen then
+    if disabled then
+        fs:SetFont(font, size, "")
+        fs:SetTextColor(0.5, 0.5, 0.5)
+    elseif chosen then
         fs:SetFont(font, size, "OUTLINE")
         fs:SetTextColor(0.2, 1.0, 0.2)
     else
@@ -197,7 +200,7 @@ local function resetInterestButtons(f)
     for _, btn in pairs(interestButtons(f)) do
         if btn then
             btn:SetButtonState("NORMAL")
-            styleButtonText(btn, false)
+            styleButtonText(btn, false, false)
         end
     end
 end
@@ -217,13 +220,17 @@ local function applyInterestButtonAvailability(self, f, roll)
     local allowed = isPlayerAllowedForRoll(self, roll, playerName)
 
     for key, btn in pairs(interestButtons(f)) do
+        local disabled = false
         if key == "pass" then
             btn:Enable()
         elseif allowed then
             btn:Enable()
         else
             btn:Disable()
+            disabled = true
         end
+        btn:SetAlpha(disabled and 0.45 or 1)
+        styleButtonText(btn, false, disabled)
     end
 end
 
@@ -331,7 +338,7 @@ local function highlightInterestButton(f, tier)
             local chosen = key == tier
             -- lock the chosen button pushed; leave the rest in their normal (up) state
             btn:SetButtonState(chosen and "PUSHED" or "NORMAL", chosen)
-            styleButtonText(btn, chosen)
+            styleButtonText(btn, chosen, not btn:IsEnabled())
         end
     end
 end
@@ -656,7 +663,7 @@ function addon:ChooseInterest(roll, tier)
     local playerName = util:GetPlayerName("player")
     if tier ~= "pass" and not isPlayerAllowedForRoll(self, roll, playerName) then
         self:Print("Your class cannot use that token. You may only pass.")
-        tier = "pass"
+        return
     end
     self:SendInterest(roll.id, tier)
     roll.choice = tier
