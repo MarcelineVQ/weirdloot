@@ -400,6 +400,23 @@ test("zone-in triggers a sync request", function()
     eq(countEv(rd, "req"), 1, "no duplicate request while one is pending")
 end)
 
+test("a channel ignores its OWN echoed broadcast (but not another sender's)", function()
+    reset()
+    local ml = makeHost("ML", true)
+    setLine(ml, "L1", "pending")
+    ml.chan:Broadcast(true)                    -- ML broadcasts a snapshot
+    local own = {}
+    for _, m in ipairs(WIRE) do own[#own + 1] = m end
+    -- feed the ML its own messages back (as a self-echoing server would)
+    for _, m in ipairs(own) do ml.chan:OnReceive("ML", m.msg) end
+    eq(countEv(ml, "recv-snap"), 0, "ML did not apply its own echoed snapshot")
+    eq(ml.chan.lastRev, nil, "ML's receive baseline untouched by self-echo")
+    -- a DIFFERENT sender's message is still processed
+    local rd = makeHost("Raider", false)
+    for _, m in ipairs(own) do rd.chan:OnReceive("ML", m.msg) end
+    eq(countEv(rd, "recv-snap"), 1, "a peer still applies the ML's snapshot")
+end)
+
 test("duplicate / stale delta is ignored (idempotent, no double-apply)", function()
     reset()
     local ml = makeHost("ML", true)

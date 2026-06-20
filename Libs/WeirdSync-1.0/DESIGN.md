@@ -124,6 +124,10 @@ own prefix, e.g. "WLSYNC").
 All WeirdSync messages share the channel prefix and are tagged by a one-letter type in field 1.
 Payload lines (`SE`, `D`) carry the host's opaque fields after the lib header.
 
+`OnReceive` drops any message whose sender is **this client itself** (some servers echo a sender
+its own RAID messages back). Only self is dropped, by name: a different sender is processed
+normally, so an authority can still receive from a secondary authority or a leadership push.
+
 | Type | Direction | Fields | Meaning |
 |---|---|---|---|
 | `SB` | authority -> RAID or WHISPER | epoch, rev, reqId | snapshot begin; reqId set only when answering a specific request (targeted/whispered) |

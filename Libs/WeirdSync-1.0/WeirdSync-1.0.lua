@@ -52,6 +52,12 @@ local function now()
     return (GetTime and GetTime()) or 0
 end
 
+-- normalize a player name for self-comparison: strip the realm and lowercase.
+local function normName(name)
+    if not name or name == "" then return "" end
+    return (name:match("^[^-]+") or name):lower()
+end
+
 function Channel:_backoff(attempt)
     -- exponential: base * mul^(attempt-1) -> 2, 4, 8, 16 with the defaults.
     return self.cfg.backoffBase * (self.cfg.backoffMul ^ (attempt - 1))
@@ -162,6 +168,11 @@ end
 -- Routed incoming message (the lib registers its prefix with AceComm; in tests the host calls
 -- this directly with the reassembled logical message).
 function Channel:OnReceive(sender, message)
+    -- Ignore our OWN echoed broadcasts (some servers deliver a sender its own RAID messages).
+    -- Only self is dropped: a different sender (a secondary authority, leadership pushing updates)
+    -- is still processed, so peer->authority flows remain open.
+    if normName(sender) == self.meKey then return end
+
     local f = decode(message)
     local t = f[1]
 
@@ -302,6 +313,7 @@ function WeirdSync:NewChannel(prefix, cb)
     ch._pending = {}        -- authority: queued changed lines awaiting Broadcast
     ch.reqSeq = 0
     ch.me = cb.selfName or (UnitName and UnitName("player")) or "?"
+    ch.meKey = normName(ch.me)
     -- per-channel-instance nonce so reqIds are unique across reloads (GetTime keeps climbing
     -- across a /reload, so each channel lifetime gets a distinct value). Injectable for tests.
     ch.nonce = cb.nonce or tostring(math.floor(now()))
