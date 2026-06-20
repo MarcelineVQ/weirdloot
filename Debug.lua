@@ -104,6 +104,24 @@ function addon:InitializeDebug()
     })
 end
 
+-- Fault injection (test only): swallow the next N outgoing sync messages so a delta is lost and
+-- the receiver hits a real rev gap, or a whole response cycle is dropped to force a resend/give-up.
+-- This wraps the WeirdSync channel's transport in the HOST rather than putting any drop logic in
+-- the library. The revision still advances on a dropped send, so the receiver sees the gap.
+function addon:EnsureSyncDropHook()
+    local chan = self.syncChannel
+    if not chan or chan.__dropHooked then return end
+    chan.__dropHooked = true
+    local orig = chan.SendCommMessage
+    chan.SendCommMessage = function(selfChan, prefix, msg, dist, target, prio)
+        if (addon._syncDropCount or 0) > 0 then
+            addon._syncDropCount = addon._syncDropCount - 1
+            return -- simulate a lost addon message
+        end
+        return orig(selfChan, prefix, msg, dist, target, prio)
+    end
+end
+
 -- Routed from Core:HandleSlashCommand for "debug ..." subcommands.
 function addon:HandleDebugCommand(rest)
     local log = ensureLog()
@@ -112,8 +130,10 @@ function addon:HandleDebugCommand(rest)
     verb = verb and string.lower(verb) or ""
 
     if verb == "" or verb == "status" then
-        self:Print(string.format("Core debug log: %s, %d record(s), seq %d, cap %d.",
-            log.enabled and "ON" or "OFF", #log.records, log.seq or 0, log.max or DEFAULT_MAX))
+        local drop = self._syncDropCount or 0
+        self:Print(string.format("Core debug log: %s, %d record(s), seq %d, cap %d.%s",
+            log.enabled and "ON" or "OFF", #log.records, log.seq or 0, log.max or DEFAULT_MAX,
+            drop > 0 and (" Dropping next " .. drop .. " sync msg(s).") or ""))
     elseif verb == "on" then
         log.enabled = true
         self:InitializeDebug()
@@ -128,6 +148,14 @@ function addon:HandleDebugCommand(rest)
     elseif verb == "mark" then
         self:MarkDebugLog(arg)
         self:Print("Marked: " .. (arg ~= "" and arg or "(unlabeled)"))
+    elseif verb == "drop" then
+        local n = tonumber(arg) or 0
+        self._syncDropCount = n
+        self:EnsureSyncDropHook()
+        self:Print(string.format("Sync fault injection: dropping the next %d outgoing sync message(s).", n))
+    elseif verb == "sync" then
+        self:RequestSessionSync()
+        self:Print("Forced a session sync request.")
     elseif verb == "dump" then
         local r = log.records
         local n = math.min(#r, 12)
@@ -139,6 +167,6 @@ function addon:HandleDebugCommand(rest)
             end
         end
     else
-        self:Print("Usage: /wl debug [status|on|off|clear|mark <label>|dump]")
+        self:Print("Usage: /wl debug [status|on|off|clear|mark <label>|dump|drop <n>|sync]")
     end
 end
