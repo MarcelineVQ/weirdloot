@@ -532,6 +532,8 @@ function addon:InitializeUI()
     end)
     frame:Hide()
 
+    tinsert(UISpecialFrames, "WeirdLootFrame")
+
     local title = createLabel(frame, "WeirdLoot", "TOPLEFT", frame, "TOPLEFT", 16, -14)
     title:SetFontObject(GameFontHighlightLarge)
 
@@ -1642,17 +1644,47 @@ local function createOptionsCheckbox(parent, label)
 end
 
 local function createNumberEditBox(parent, width)
-    local box = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
-    elevateInteractiveFrame(box, parent, 8)
-    box:SetWidth(width or 50)
-    box:SetHeight(28)
+    local w = width or 50
+    local h = 20
+
+    local bg = CreateFrame("Frame", nil, parent)
+    elevateInteractiveFrame(bg, parent, 8)
+    bg:SetWidth(w)
+    bg:SetHeight(h)
+    bg:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = false,
+        edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    bg:SetBackdropColor(0, 0, 0, 0.7)
+    bg:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+
+    local box = CreateFrame("EditBox", nil, bg)
+    elevateInteractiveFrame(box, bg, 1)
+    box:SetPoint("TOPLEFT", bg, "TOPLEFT", 4, -2)
+    box:SetPoint("BOTTOMRIGHT", bg, "BOTTOMRIGHT", -4, 2)
     box:SetFontObject(GameFontHighlight)
+    box:SetJustifyH("CENTER")
     box:SetAutoFocus(false)
     box:SetNumeric(true)
     box:SetMaxLetters(4)
     box:SetScript("OnEscapePressed", function(selfBox) selfBox:ClearFocus() end)
     box:SetScript("OnEnterPressed", function(selfBox) selfBox:ClearFocus() end)
-    return box
+
+    -- Expose box methods on the container so existing call sites that anchor
+    -- to / read from the "edit box" keep working through the wrapper.
+    bg.editBox = box
+    bg.SetText = function(_, text) box:SetText(text) end
+    bg.GetText = function() return box:GetText() end
+    bg.SetTextColor = function(_, r, g, b, a) box:SetTextColor(r, g, b, a or 1) end
+    bg.SetScript = function(_, scriptType, fn) box:SetScript(scriptType, fn) end
+    bg.SetNumeric = function(_, v) box:SetNumeric(v) end
+    bg.SetFocus = function() box:SetFocus() end
+    bg.ClearFocus = function() box:ClearFocus() end
+
+    return bg
 end
 
 local multilineScrollSeq = 0
