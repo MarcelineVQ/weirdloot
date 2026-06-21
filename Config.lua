@@ -825,6 +825,18 @@ function addon:SaveImports(rosterText, lootText, namedText)
     self:Print("Configuration saved.")
 end
 
+function addon:SaveRosterText(rosterText, suppressPrint)
+    self.config.rosterEntries = self:ParseRosterImport(rosterText or "")
+    self.config.rosterImportText = rosterText or ""
+    self.config.revision = (self.config.revision or 0) + 1
+    self:NormalizeAllConfig()
+    self:RefreshRoster()
+    self:TriggerCallback("CONFIG_UPDATED")
+    if not suppressPrint then
+        self:Print("Roster saved.")
+    end
+end
+
 function addon:SaveNamedItemsText(namedText, suppressPrint)
     self.config.namedItemsText = namedText or ""
     self.config.revision = (self.config.revision or 0) + 1

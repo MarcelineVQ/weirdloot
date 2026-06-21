@@ -239,6 +239,20 @@ function addon:BroadcastNamedItems()
     self:Print("Broadcast named items sent to raid.")
 end
 
+function addon:BroadcastRoster()
+    if not self:IsAuthorizedLootMaster() then
+        self:Print("Only the loot master can broadcast the roster.")
+        return
+    end
+
+    self:SendLargeMessage("ROSTER_SYNC", {
+        self:GetLootMasterName() or "",
+        self.config.rosterImportText or "",
+    }, "RAID")
+
+    self:Print("Broadcast roster sent to raid.")
+end
+
 -- AceComm receive callback: prefix-filtered and already reassembled. We still
 -- never receive our own RAID/PARTY messages (the client drops them), but keep the
 -- self-skip defensively in case of a self-WHISPER echo.
@@ -328,6 +342,14 @@ function addon:HandleCommMessage(sender, logical)
         end
         self:SaveNamedItemsText(fields[2] or "", true)
         self:Print("Named items updated from " .. ((fields[1] ~= "" and fields[1]) or sender or "loot master") .. ".")
+    elseif command == "ROSTER_SYNC" then
+        local expectedLootMaster = util:NormalizeKey(self:GetLootMasterName() or "")
+        local senderKey = util:NormalizeKey(sender or "")
+        if expectedLootMaster ~= "" and senderKey ~= expectedLootMaster then
+            return
+        end
+        self:SaveRosterText(fields[2] or "", true)
+        self:Print("Roster updated from " .. ((fields[1] ~= "" and fields[1]) or sender or "loot master") .. ".")
     elseif command == "ITEM_LOCK" then
         self.session.lockedItems = self.session.lockedItems or {}
         self.session.lockedItems[fields[2]] = fields[3] == "1"
