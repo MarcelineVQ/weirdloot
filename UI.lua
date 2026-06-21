@@ -593,6 +593,9 @@ function addon:SelectTab(tabKey)
         end
     end
 
+    -- Freshen the eligible list when the loot tab is opened: drops items whose trade window
+    -- lapsed silently (no bag event), so they can't be rolled. No-op unless ML with a session.
+    if tabKey == "loot" then self:ReconcileLootNow() end
     self:RefreshUI()
 end
 
@@ -606,6 +609,7 @@ function addon:ToggleMainFrame()
         self.ui.frame:Hide()
     else
         self.ui.frame:Show()
+        if self.ui.selectedTab == "loot" then self:ReconcileLootNow() end
         self:RefreshUI()
     end
 end

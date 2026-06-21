@@ -532,6 +532,20 @@ function addon:ScheduleAuthorityRecheck()
     authRetry:Show()
 end
 
+-- Periodic eligible-loot reconcile. A BoP trade window expiring fires no game event, so without a
+-- timed re-scan an item that lapsed while idle stays on the list as rollable. Out of combat only --
+-- tooltip scans + ledger churn shouldn't run mid-fight; we just wait for the next period.
+local RECONCILE_PERIOD = 60
+local reconcileTicker = CreateFrame("Frame")
+reconcileTicker.elapsed = 0
+reconcileTicker:SetScript("OnUpdate", function(frame, dt)
+    frame.elapsed = (frame.elapsed or 0) + dt
+    if frame.elapsed < RECONCILE_PERIOD then return end
+    frame.elapsed = 0
+    if InCombatLockdown and InCombatLockdown() then return end
+    addon:ReconcileLootNow()        -- no-op unless ML with an active session
+end)
+
 -- Re-evaluate authority; if we only NOW resolve as ML (data finally arrived), run the
 -- ML-on-login work the early PLAYER_ENTERING_WORLD check skipped.
 function addon:RecheckLootAuthority()
@@ -554,6 +568,7 @@ end
 function addon:PLAYER_ENTERING_WORLD()
     self:RefreshAll()
     if self:IsAuthorizedLootMaster() then
+        self:OnBagUpdate()              -- drop items whose trade window lapsed while away, before broadcasting
         self:AutoBroadcastSession(true)
         self:RestorePendingPopups()     -- re-show pending items the ML hadn't decided on
     else

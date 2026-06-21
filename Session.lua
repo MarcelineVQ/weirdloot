@@ -521,6 +521,16 @@ function addon:OnBagUpdate()
     return true
 end
 
+-- Re-scan bags and reconcile the ledger NOW (then broadcast any change), driven by triggers other
+-- than BAG_UPDATE: opening the loot tab, Start Roll, a periodic out-of-combat tick, and zone-in. A
+-- BoP trade window expiring fires no game event -- the item stays in bags, only its tooltip changes
+-- -- so without an out-of-band re-scan a now-untradeable item lingers on the list as rollable. The
+-- scan already excludes expired-window items; this just makes the reconcile actually run. No-op for
+-- raiders or when no session is active.
+function addon:ReconcileLootNow()
+    if self:OnBagUpdate() then self:AutoBroadcastSession(false) end
+end
+
 function addon:SetPlayerResponse(lotId, playerName, choice)
     if self:IsItemLocked(lotId) then
         return false

@@ -889,9 +889,19 @@ function addon:StartLiveRoll(lotId)
         self:Print("Only the loot master can put items up for roll.")
         return
     end
+    -- Re-validate tradeability before broadcasting: a trade window can lapse with no bag event, so
+    -- re-scan now. Count-aware (duplicates carry independent windows): we refuse only when EVERY
+    -- copy of this lot has expired; if a tradeable copy remains, the reconcile shrinks the lot to
+    -- that count and we roll it.
+    self:ReconcileLootNow()
     local core = self.lootCore
     local lot = core:Get(lotId)
     if not lot then return end
+    if core:LiveCount(lotId) <= 0 then
+        local name = (util:ItemRender(lot.itemId)) or ("item:" .. tostring(lot.itemId))
+        self:Print(name .. " can no longer be traded (its trade window expired); not putting it up for roll.")
+        return
+    end
 
     local name, link, icon = util:ItemRender(lot.itemId)
     name = name or link or ("item:" .. tostring(lot.itemId))

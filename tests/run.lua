@@ -525,6 +525,42 @@ test("delivery records per-copy disposition", function()
     eq(w.addon.lootCore:Get(lot.id).awards[1].recipient, "Alice", "recipient recorded")
 end)
 
+test("expired trade window: a re-scan drops a now-untradeable item still sitting in bags", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    setBag(w, 40005, 1); bagUpdate(w)
+    local lot = openLot(w, 40005)
+    eq(w.addon.lootCore:LiveCount(lot.id), 1, "tradeable initially")
+    -- the 2h window expires: the item is still in bags but the scan no longer counts it, and NO
+    -- bag event fires. The periodic / on-open reconcile must drop it.
+    setBag(w, 40005, 0)
+    w.addon:ReconcileLootNow()
+    eq(w.addon.lootCore:LiveCount(lot.id), 0, "re-scan retired the expired item from the eligible set")
+end)
+
+test("Start Roll refuses an item whose every copy's trade window expired (not broadcast)", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    setBag(w, 40005, 1); bagUpdate(w)
+    local lot = openLot(w, 40005)
+    setBag(w, 40005, 0)                          -- window expired, no bag event
+    w.addon:StartLiveRoll(lot.id)                -- must reconcile + refuse
+    check(w.addon.lootCore:State(lot.id) ~= "rolling", "expired item was not put up for roll")
+    eq(w.addon.lootCore:LiveCount(lot.id), 0, "expired item retired, not rolled")
+end)
+
+test("Start Roll respects per-copy windows: rolls the tradeable copy when a duplicate expired", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    setBag(w, 40005, 2); bagUpdate(w)            -- two copies, both tradeable
+    local lot = openLot(w, 40005)
+    eq(lot.count, 2, "lot has both copies")
+    setBag(w, 40005, 1)                          -- ONE window expires (no bag event), one still good
+    w.addon:StartLiveRoll(lot.id)                -- reconcile shrinks to 1, then rolls it
+    eq(w.addon.lootCore:State(lot.id), "rolling", "still rolls: a tradeable copy remains")
+    eq(w.addon.lootCore:LiveCount(lot.id), 1, "rolls only the still-tradeable copy")
+end)
+
 test("reconcile retire: item leaves bags -> lot retired", function()
     local w = makeWorld("Masterlooter", true)
     startSession(w)
