@@ -1645,7 +1645,8 @@ local function createNumberEditBox(parent, width)
     local box = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
     elevateInteractiveFrame(box, parent, 8)
     box:SetWidth(width or 50)
-    box:SetHeight(20)
+    box:SetHeight(28)
+    box:SetFontObject(GameFontHighlight)
     box:SetAutoFocus(false)
     box:SetNumeric(true)
     box:SetMaxLetters(4)
@@ -1693,10 +1694,27 @@ local function createMultilineEditScroll(parent, width, height)
 end
 
 function addon:BuildOptionsTab()
-    local panel = CreateFrame("Frame", nil, self.ui.content)
-    elevateInteractiveFrame(panel, self.ui.content, 2)
-    panel:SetAllPoints(self.ui.content)
-    self.ui.panels.options = panel
+    local scroll = CreateFrame("ScrollFrame", "WeirdLootOptionsScrollFrame", self.ui.content, "UIPanelScrollFrameTemplate")
+    elevateInteractiveFrame(scroll, self.ui.content, 2)
+    scroll:SetPoint("TOPLEFT", self.ui.content, "TOPLEFT", 0, 0)
+    scroll:SetPoint("BOTTOMRIGHT", self.ui.content, "BOTTOMRIGHT", -24, 0)
+    self.ui.panels.options = scroll
+
+    local panel = CreateFrame("Frame", nil, scroll)
+    elevateInteractiveFrame(panel, scroll, 1)
+    panel:SetWidth(920)
+    panel:SetHeight(900)
+    scroll:SetScrollChild(panel)
+    scroll:EnableMouseWheel(true)
+    scroll:SetScript("OnMouseWheel", function(selfFrame, delta)
+        local current = selfFrame:GetVerticalScroll() or 0
+        local max = selfFrame:GetVerticalScrollRange() or 0
+        local step = 30
+        local new = current - delta * step
+        if new < 0 then new = 0 elseif new > max then new = max end
+        selfFrame:SetVerticalScroll(new)
+    end)
+    self.ui.optionsPanel = panel
 
     local opt = getOptions(self)
 
@@ -1707,12 +1725,9 @@ function addon:BuildOptionsTab()
     local autoCloseCB = createOptionsCheckbox(panel, "Auto-close winner popup after")
     autoCloseCB:SetPoint("TOPLEFT", panel.title, "BOTTOMLEFT", 0, -16)
     autoCloseCB:SetChecked(opt.resultPopupAutoCloseEnabled and true or false)
-    autoCloseCB:SetScript("OnClick", function(selfCB)
-        getOptions(addon).resultPopupAutoCloseEnabled = selfCB:GetChecked() and true or false
-    end)
 
-    local autoCloseSeconds = createNumberEditBox(panel, 50)
-    autoCloseSeconds:SetPoint("LEFT", autoCloseCB.label or autoCloseCB, "RIGHT", 160, 0)
+    local autoCloseSeconds = createNumberEditBox(panel, 40)
+    autoCloseSeconds:SetPoint("LEFT", autoCloseCB.label or autoCloseCB, "RIGHT", 8, 0)
     autoCloseSeconds:SetText(tostring(opt.resultPopupAutoCloseSeconds or 15))
     autoCloseSeconds:SetScript("OnEditFocusLost", function(selfBox)
         local v = tonumber(selfBox:GetText())
@@ -1723,6 +1738,19 @@ function addon:BuildOptionsTab()
         end
     end)
     local autoCloseLabel = createLabel(panel, "seconds", "LEFT", autoCloseSeconds, "RIGHT", 6, 0)
+
+    local function applyAutoCloseColor()
+        if autoCloseCB:GetChecked() then
+            autoCloseSeconds:SetTextColor(1, 1, 1)
+        else
+            autoCloseSeconds:SetTextColor(0.5, 0.5, 0.5)
+        end
+    end
+    autoCloseCB:SetScript("OnClick", function(selfCB)
+        getOptions(addon).resultPopupAutoCloseEnabled = selfCB:GetChecked() and true or false
+        applyAutoCloseColor()
+    end)
+    applyAutoCloseColor()
 
     -- Roll duration (loot master)
     local rollDurLabel = createLabel(panel, "Roll duration (seconds, loot master only):",
@@ -1740,42 +1768,200 @@ function addon:BuildOptionsTab()
     end)
 
     -- Whitelist
-    local whitelistCB = createOptionsCheckbox(panel, "Enable whitelist (only show live loot popups for items on this list; non-loot-master only)")
+    local whitelistCB = createOptionsCheckbox(panel, "Enable White List (Warning: You will ONLY see loot popups for items on this list)")
     whitelistCB:SetPoint("TOPLEFT", rollDurLabel, "BOTTOMLEFT", 0, -24)
     whitelistCB:SetChecked(opt.whitelistEnabled and true or false)
     whitelistCB:SetScript("OnClick", function(selfCB)
         getOptions(addon).whitelistEnabled = selfCB:GetChecked() and true or false
     end)
 
+    local wlPresetLabel = createLabel(panel, "Preset:", "TOPLEFT", whitelistCB, "BOTTOMLEFT", 4, -10)
+    local wlPresetDropdown = CreateFrame("Frame", "WeirdLootWhitelistPresetDropdown", panel, "UIDropDownMenuTemplate")
+    elevateInteractiveFrame(wlPresetDropdown, panel, 10)
+    wlPresetDropdown:SetPoint("LEFT", wlPresetLabel, "RIGHT", -4, -2)
+    UIDropDownMenu_SetWidth(wlPresetDropdown, 160)
+    UIDropDownMenu_JustifyText(wlPresetDropdown, "LEFT")
+    if UIDropDownMenu_EnableDropDown then
+        UIDropDownMenu_EnableDropDown(wlPresetDropdown)
+    end
+    local wlDdButton = _G["WeirdLootWhitelistPresetDropdownButton"]
+    if wlDdButton then
+        wlDdButton:SetFrameLevel((wlPresetDropdown:GetFrameLevel() or 0) + 2)
+        wlDdButton:Enable()
+    end
+
+    local wlSaveBtn = createButton(panel, "Save as...", 80, 22)
+    wlSaveBtn:SetPoint("LEFT", wlPresetDropdown, "RIGHT", 4, 2)
+    wlSaveBtn:SetScript("OnClick", function()
+        StaticPopup_Show("WEIRDLOOT_SAVE_WHITELIST_PRESET")
+    end)
+
+    local wlDeleteBtn = createButton(panel, "Delete", 60, 22)
+    wlDeleteBtn:SetPoint("LEFT", wlSaveBtn, "RIGHT", 4, 0)
+    wlDeleteBtn:Disable()
+
     local whitelistBox = createMultilineEditScroll(panel, 420, 110)
-    whitelistBox:SetPoint("TOPLEFT", whitelistCB, "BOTTOMLEFT", 4, -6)
+    whitelistBox:SetPoint("TOPLEFT", wlPresetDropdown, "BOTTOMLEFT", 16, -2)
     whitelistBox.editBox:SetText(opt.whitelistText or "")
     whitelistBox.editBox:SetScript("OnEditFocusLost", function(selfBox)
         getOptions(addon).whitelistText = selfBox:GetText() or ""
     end)
 
+    local function applyWhitelistPreset(preset)
+        if not preset then
+            UIDropDownMenu_SetText(wlPresetDropdown, "<none>")
+            wlDeleteBtn:Disable()
+            return
+        end
+        whitelistBox.editBox:SetText(preset.text or "")
+        getOptions(addon).whitelistText = preset.text or ""
+        UIDropDownMenu_SetText(wlPresetDropdown, preset.name)
+        if preset.builtin then
+            wlDeleteBtn:Disable()
+        else
+            wlDeleteBtn:Enable()
+        end
+        wlDeleteBtn.currentPresetName = preset.name
+        wlDeleteBtn.currentPresetBuiltin = preset.builtin
+    end
+
+    local function wlInitDropdown()
+        local noneInfo = UIDropDownMenu_CreateInfo()
+        noneInfo.text = "<none>"
+        noneInfo.value = ""
+        noneInfo.func = function() applyWhitelistPreset({ name = "<none>", text = "", builtin = true, isNone = true }) end
+        UIDropDownMenu_AddButton(noneInfo)
+        for _, preset in ipairs(addon:GetWhitelistPresets()) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = preset.builtin and preset.name or (preset.name .. " (custom)")
+            info.value = preset.name
+            info.func = function() applyWhitelistPreset(preset) end
+            UIDropDownMenu_AddButton(info)
+        end
+    end
+    UIDropDownMenu_Initialize(wlPresetDropdown, wlInitDropdown)
+    UIDropDownMenu_SetText(wlPresetDropdown, "<none>")
+
+    wlDeleteBtn:SetScript("OnClick", function()
+        local name = wlDeleteBtn.currentPresetName
+        if not name or wlDeleteBtn.currentPresetBuiltin then return end
+        local dialog = StaticPopup_Show("WEIRDLOOT_DELETE_WHITELIST_PRESET", name)
+        if dialog then dialog.data = name end
+    end)
+
+    function addon:RefreshWhitelistPresetDropdown(selectName)
+        UIDropDownMenu_Initialize(wlPresetDropdown, wlInitDropdown)
+        if selectName then
+            for _, preset in ipairs(self:GetWhitelistPresets()) do
+                if preset.name == selectName then
+                    applyWhitelistPreset(preset)
+                    return
+                end
+            end
+        end
+        applyWhitelistPreset(nil)
+    end
+
     -- Blacklist
-    local blacklistCB = createOptionsCheckbox(panel, "Enable blacklist (hide live loot popups for items on this list; non-loot-master only)")
-    blacklistCB:SetPoint("TOPLEFT", whitelistBox, "BOTTOMLEFT", -4, -16)
+    local blacklistCB = createOptionsCheckbox(panel, "Enable Black List (Warning: you will ONLY see loot popups for items NOT on this list)")
+    blacklistCB:SetPoint("TOP", whitelistBox, "BOTTOM", 0, -16)
+    blacklistCB:SetPoint("LEFT", panel, "LEFT", 12, 0)
     blacklistCB:SetChecked(opt.blacklistEnabled and true or false)
     blacklistCB:SetScript("OnClick", function(selfCB)
         getOptions(addon).blacklistEnabled = selfCB:GetChecked() and true or false
     end)
 
+    local presetLabel = createLabel(panel, "Preset:", "TOPLEFT", blacklistCB, "BOTTOMLEFT", 4, -10)
+    local presetDropdown = CreateFrame("Frame", "WeirdLootBlacklistPresetDropdown", panel, "UIDropDownMenuTemplate")
+    elevateInteractiveFrame(presetDropdown, panel, 10)
+    presetDropdown:SetPoint("LEFT", presetLabel, "RIGHT", -4, -2)
+    UIDropDownMenu_SetWidth(presetDropdown, 160)
+    UIDropDownMenu_JustifyText(presetDropdown, "LEFT")
+    if UIDropDownMenu_EnableDropDown then
+        UIDropDownMenu_EnableDropDown(presetDropdown)
+    end
+    local ddButton = _G["WeirdLootBlacklistPresetDropdownButton"]
+    if ddButton then
+        ddButton:SetFrameLevel((presetDropdown:GetFrameLevel() or 0) + 2)
+        ddButton:Enable()
+    end
+
+    local saveBtn = createButton(panel, "Save as...", 80, 22)
+    saveBtn:SetPoint("LEFT", presetDropdown, "RIGHT", 4, 2)
+    saveBtn:SetScript("OnClick", function()
+        StaticPopup_Show("WEIRDLOOT_SAVE_BLACKLIST_PRESET")
+    end)
+
+    local deleteBtn = createButton(panel, "Delete", 60, 22)
+    deleteBtn:SetPoint("LEFT", saveBtn, "RIGHT", 4, 0)
+    deleteBtn:Disable()
+
     local blacklistBox = createMultilineEditScroll(panel, 420, 110)
-    blacklistBox:SetPoint("TOPLEFT", blacklistCB, "BOTTOMLEFT", 4, -6)
+    blacklistBox:SetPoint("TOPLEFT", presetDropdown, "BOTTOMLEFT", 16, -2)
     blacklistBox.editBox:SetText(opt.blacklistText or "")
     blacklistBox.editBox:SetScript("OnEditFocusLost", function(selfBox)
         getOptions(addon).blacklistText = selfBox:GetText() or ""
     end)
 
-    local hint = createLabel(panel, "Enter one item name per line. Names are matched case-insensitively.",
-        "TOPLEFT", blacklistBox, "BOTTOMLEFT", -4, -10)
-    hint:SetTextColor(0.75, 0.75, 0.75)
+    local function applyPreset(preset)
+        if not preset then
+            UIDropDownMenu_SetText(presetDropdown, "<none>")
+            deleteBtn:Disable()
+            return
+        end
+        blacklistBox.editBox:SetText(preset.text or "")
+        getOptions(addon).blacklistText = preset.text or ""
+        UIDropDownMenu_SetText(presetDropdown, preset.name)
+        if preset.builtin then
+            deleteBtn:Disable()
+        else
+            deleteBtn:Enable()
+        end
+        deleteBtn.currentPresetName = preset.name
+        deleteBtn.currentPresetBuiltin = preset.builtin
+    end
+
+    local function initDropdown()
+        local noneInfo = UIDropDownMenu_CreateInfo()
+        noneInfo.text = "<none>"
+        noneInfo.value = ""
+        noneInfo.func = function() applyPreset({ name = "<none>", text = "", builtin = true, isNone = true }) end
+        UIDropDownMenu_AddButton(noneInfo)
+        for _, preset in ipairs(addon:GetBlacklistPresets()) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = preset.builtin and preset.name or (preset.name .. " (custom)")
+            info.value = preset.name
+            info.func = function() applyPreset(preset) end
+            UIDropDownMenu_AddButton(info)
+        end
+    end
+    UIDropDownMenu_Initialize(presetDropdown, initDropdown)
+    UIDropDownMenu_SetText(presetDropdown, "<none>")
+
+    deleteBtn:SetScript("OnClick", function()
+        local name = deleteBtn.currentPresetName
+        if not name or deleteBtn.currentPresetBuiltin then return end
+        local dialog = StaticPopup_Show("WEIRDLOOT_DELETE_BLACKLIST_PRESET", name)
+        if dialog then dialog.data = name end
+    end)
+
+    function addon:RefreshBlacklistPresetDropdown(selectName)
+        UIDropDownMenu_Initialize(presetDropdown, initDropdown)
+        if selectName then
+            for _, preset in ipairs(self:GetBlacklistPresets()) do
+                if preset.name == selectName then
+                    applyPreset(preset)
+                    return
+                end
+            end
+        end
+        applyPreset(nil)
+    end
 
     -- Minimap button visibility
     local minimapCB = createOptionsCheckbox(panel, "Show minimap button")
-    minimapCB:SetPoint("TOPLEFT", hint, "BOTTOMLEFT", 0, -18)
+    minimapCB:SetPoint("TOP", blacklistBox, "BOTTOM", 0, -18)
+    minimapCB:SetPoint("LEFT", panel, "LEFT", 12, 0)
     minimapCB:SetChecked(not (opt.minimapButtonHidden and true or false))
     minimapCB:SetScript("OnClick", function(selfCB)
         local checked = selfCB:GetChecked() and true or false
@@ -1788,8 +1974,14 @@ function addon:BuildOptionsTab()
     panel.rollDurBox = rollDurBox
     panel.whitelistCB = whitelistCB
     panel.whitelistBox = whitelistBox
+    panel.whitelistPresetDropdown = wlPresetDropdown
+    panel.whitelistSaveBtn = wlSaveBtn
+    panel.whitelistDeleteBtn = wlDeleteBtn
     panel.blacklistCB = blacklistCB
     panel.blacklistBox = blacklistBox
+    panel.blacklistPresetDropdown = presetDropdown
+    panel.blacklistSaveBtn = saveBtn
+    panel.blacklistDeleteBtn = deleteBtn
     panel.minimapCB = minimapCB
 end
 

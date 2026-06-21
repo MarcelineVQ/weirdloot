@@ -293,6 +293,305 @@ local defaultNamedItemsText = table.concat({
     "Frosted Adroit Handguards, Mitsuki > Iseut > LC",
 }, "\n")
 
+addon.blacklistPresets = {
+    {
+        name = "Warlock",
+        text = table.concat({
+            "Aged Winter Cloak",
+            "Drape of the Deadly Foe",
+            "Shadow of the Ghoul",
+            "Cloak of the Shadowed Sun",
+            "Arrowsong",
+            "Final Voyage",
+            "Strong-Handed Ring",
+            "Ruthlessness",
+            "Sand-Worn Band",
+            "Gatekeeper",
+            "Envoy of Mortality",
+            "Idol of Worship",
+            "Idol of the Shooting Star",
+            "Idol of Awakening",
+            "Dawnwalkers",
+            "Dislocating Handguards",
+            "Infectious Skitterer Leggings",
+            "Sinner's Bindings",
+            "Thrusting Bands",
+            "Stalk-Skin Belt",
+            "Footwraps of Vile Deceit",
+            "Chestpiece of Suspicion",
+            "Spaulders of Egotism",
+            "Hood of the Exodus",
+            "Leggings of Fleeting Moments",
+            "Belt of the Tortured",
+            "Tunic of Indulgence",
+            "Cover of Silence",
+            "Gloves of Fast Reactions",
+            "Concealment Shoulderpads",
+            "Leggings of the Honored",
+            "Chestguard of the Recluse",
+            "Frosted Adroit Handguards",
+            "Boots of the Escaped Captive",
+            "Swarm Bindings",
+            "Tunic of Prejudice",
+            "Cowl of the Perished",
+            "Mantle of Shattered Kinship",
+            "Belt of Potent Chanting",
+            "Gloves of the Dancing Bear",
+            "Vest of Vitality",
+            "Esteemed Bindings",
+            "Shackled Cinch",
+            "Gloves of Peaceful Death",
+            "Boots of Septic Wounds",
+            "Desecrated Past",
+            "Headpiece of Fungal Bloom",
+            "Legguards of the Boneyard",
+            "Mantle of the Eternal Sentinel",
+            "Headpiece of Reconciliation",
+            "Spaulders of Catatonia",
+            "Unravelling Strands of Sanity",
+            "Libram of Radiance",
+            "Libram of Resurgence",
+            "Libram of Tolerance",
+            "Arachnoid Gold Band",
+            "Cult's Chestguard",
+            "Torn Web Wrapping",
+            "Tunic of Masked Suffering",
+            "Crippled Treads",
+            "Leggings of Colossal Strides",
+            "Grotesque Handgrips",
+            "Shoulderpads of Secret Arts",
+            "Leggings of Failed Escape",
+            "Helm of the Grave",
+            "Pauldrons of Havoc",
+            "Gloves of Calculated Risk",
+            "Depraved Linked Belt",
+            "Slime Stream Bands",
+            "Pauldrons of the Abandoned",
+            "Boots of the Great Construct",
+            "Hyaline Helm of the Sniper",
+            "Upstanding Spaulders",
+            "Boots of the Renewed Flight",
+            "Blue Aspect Helm",
+            "Corpse Scarab Handguards",
+            "Atonement Greaves",
+            "Quivering Tunic",
+            "Legguards of the Undisturbed",
+            "Eruption-Scarred Boots",
+            "Helm of Pilgrimage",
+            "Bindings of the Decrepit",
+            "Girdle of Recuperation",
+            "Bands of Mutual Respect",
+            "Helm of Unleashed Energy",
+            "Leggings of Voracious Shadows",
+            "Girdle of the Gambit",
+            "Fallout Impervious Tunic",
+            "Spaulders of Incoherence",
+            "Benefactor's Gauntlets",
+            "Bountiful Gauntlets",
+            "Council Chamber Epaulets",
+            "Tunic of the Artifact Guardian",
+            "Winter Spectacle Gloves",
+            "Calamity's Grasp",
+            "Wraith Strike",
+            "Fool's Trial",
+            "Icy Blast Amulet",
+            "Heritage",
+            "Boundless Ambition",
+            "The Hand of Nerub",
+            "Last Laugh",
+            "Webbed Death",
+            "Twilight Mist",
+            "Murder",
+            "Sinister Revenge",
+            "Angry Dread",
+            "Split Greathammer",
+            "Silent Crusader",
+            "Widow's Fury",
+            "Broken Promise",
+            "Shoulderguards of the Undaunted",
+            "Sabatons of Sudden Reprisal",
+            "Bracers of the Tyrant",
+            "Fire-Scorched Greathelm",
+            "Undiminished Battleplate",
+            "Shoulderguards of Opportunity",
+            "Iron-Spring Jumpers",
+            "Legplates of Double Strikes",
+            "Girdle of Razuvious",
+            "Bracers of Unrelenting Attack",
+            "Zeliek's Gauntlets",
+            "Crude Discolored Battlegrips",
+            "Girdle of Chivalry",
+            "Riveted Abomination Leggings",
+            "Breastplate of Frozen Pain",
+            "Obsidian Greathelm",
+            "Melancholy Sabatons",
+            "Rescinding Grips",
+            "Epaulets of the Grieving Servant",
+            "Helm of Diminished Pride",
+            "Poignant Sabatons",
+            "Chestguard of Bitter Charms",
+            "Legguards of the Apostle",
+            "Girdle of Unity",
+            "Faithful Steel Sabatons",
+            "Gauntlets of Guiding Touch",
+            "Abetment Bracers",
+            "Waistguard of Divine Grace",
+            "Bracers of Liberation",
+            "Faceguard of the Succumbed",
+            "Bone-Inlaid Legguards",
+            "Noble Birthright Pauldrons",
+            "Chestplate of the Great Aspects",
+            "Boots of Healing Energies",
+            "Elevated Lair Pauldrons",
+            "Inexorable Sabatons",
+            "Pauldrons of Unnatural Death",
+            "Callous-Hearted Gauntlets",
+            "Ablative Chitin Girdle",
+            "Bindings of the Hapless Prey",
+            "Gauntlets of the Disobedient",
+            "Breastplate of Tormented Rage",
+            "Greaves of Turbulence",
+            "Bracers of the Unholy Knight",
+            "Helm of Vital Protection",
+            "Burdened Shoulderplates",
+            "Fleshless Girdle",
+            "Chestguard of the Exhausted",
+            "Sabatons of Endurance",
+            "Platehelm of the Great Wyrm",
+            "Dragonstorm Breastplate",
+            "Dragon Brood Legguards",
+            "Legplates of Sovereignty",
+            "Cryptfiend's Bite",
+            "Shield of Assimilation",
+            "Voice of Reason",
+            "Hero's Surrender",
+            "Wall of Terror",
+            "Sigil of Awareness",
+            "The Undeath Carrier",
+            "Origin of Nightmares",
+            "Journey's End",
+            "Spinning Fate",
+            "Totem of Misery",
+            "Totem of Dueling",
+            "Totem of Hex",
+            "Grim Toll",
+            "Bandit's Insignia",
+            "Fury of the Five Flights",
+            "Mark of Norgannon",
+            "Defender's Code",
+            "Rune of Repulsion",
+            "Betrayer of Humanity",
+            "Inevitable Defeat",
+            "The Jawbone",
+            "Armageddon",
+            "The Impossible Dream",
+            "Torch of Holy Fire",
+            "Cloak of Averted Crisis",
+            "Sash of the Parlor",
+            "Wraps of the Persecuted",
+            "Sympathetic Amice",
+            "Sash of Solitude",
+            "Bindings of Yearning",
+            "Cowl of Innocent Delight",
+            "Blanketing Robes of Snow",
+            "Sympathy",
+            "Breastplate of the Lost Vanquisher",
+            "Gauntlets of the Lost Vanquisher",
+            "Crown of the Lost Vanquisher",
+            "Legplates of the Lost Vanquisher",
+            "Mantle of the Lost Vanquisher",
+            "Breastplate of the Lost Protector",
+            "Gauntlets of the Lost Protector",
+            "Crown of the Lost Protector",
+            "Legplates of the Lost Protector",
+            "Mantle of the Lost Protector",
+        }, "\n"),
+    },
+}
+
+addon.whitelistPresets = {}
+
+function addon:GetWhitelistPresets()
+    local list = {}
+    for _, preset in ipairs(self.whitelistPresets or {}) do
+        list[#list + 1] = { name = preset.name, text = preset.text, builtin = true }
+    end
+    local custom = (self.db and self.db.options and self.db.options.customWhitelistPresets) or {}
+    local customNames = {}
+    for name in pairs(custom) do customNames[#customNames + 1] = name end
+    table.sort(customNames)
+    for _, name in ipairs(customNames) do
+        list[#list + 1] = { name = name, text = custom[name] or "", builtin = false }
+    end
+    return list
+end
+
+function addon:SaveCustomWhitelistPreset(name, text)
+    if type(name) ~= "string" or name == "" then return false end
+    self.db.options = self.db.options or {}
+    self.db.options.customWhitelistPresets = self.db.options.customWhitelistPresets or {}
+    for _, preset in ipairs(self.whitelistPresets or {}) do
+        if preset.name == name then
+            self:Print("Cannot overwrite built-in preset: " .. name)
+            return false
+        end
+    end
+    self.db.options.customWhitelistPresets[name] = text or ""
+    self:Print("Saved whitelist preset: " .. name)
+    return true
+end
+
+function addon:DeleteCustomWhitelistPreset(name)
+    if type(name) ~= "string" or name == "" then return false end
+    self.db.options = self.db.options or {}
+    self.db.options.customWhitelistPresets = self.db.options.customWhitelistPresets or {}
+    if self.db.options.customWhitelistPresets[name] == nil then return false end
+    self.db.options.customWhitelistPresets[name] = nil
+    self:Print("Deleted whitelist preset: " .. name)
+    return true
+end
+
+function addon:GetBlacklistPresets()
+    local list = {}
+    for _, preset in ipairs(self.blacklistPresets or {}) do
+        list[#list + 1] = { name = preset.name, text = preset.text, builtin = true }
+    end
+    local custom = (self.db and self.db.options and self.db.options.customBlacklistPresets) or {}
+    -- Sort custom presets by name for stable order
+    local customNames = {}
+    for name in pairs(custom) do customNames[#customNames + 1] = name end
+    table.sort(customNames)
+    for _, name in ipairs(customNames) do
+        list[#list + 1] = { name = name, text = custom[name] or "", builtin = false }
+    end
+    return list
+end
+
+function addon:SaveCustomBlacklistPreset(name, text)
+    if type(name) ~= "string" or name == "" then return false end
+    self.db.options = self.db.options or {}
+    self.db.options.customBlacklistPresets = self.db.options.customBlacklistPresets or {}
+    for _, preset in ipairs(self.blacklistPresets or {}) do
+        if preset.name == name then
+            self:Print("Cannot overwrite built-in preset: " .. name)
+            return false
+        end
+    end
+    self.db.options.customBlacklistPresets[name] = text or ""
+    self:Print("Saved blacklist preset: " .. name)
+    return true
+end
+
+function addon:DeleteCustomBlacklistPreset(name)
+    if type(name) ~= "string" or name == "" then return false end
+    self.db.options = self.db.options or {}
+    self.db.options.customBlacklistPresets = self.db.options.customBlacklistPresets or {}
+    if self.db.options.customBlacklistPresets[name] == nil then return false end
+    self.db.options.customBlacklistPresets[name] = nil
+    self:Print("Deleted blacklist preset: " .. name)
+    return true
+end
+
 local function onEvent(self, event, ...)
     if addon[event] then
         addon[event](addon, ...)
@@ -365,6 +664,8 @@ function addon:PLAYER_LOGIN()
             whitelistText = "",
             blacklistEnabled = false,
             blacklistText = "",
+            customBlacklistPresets = {},
+            customWhitelistPresets = {},
             minimapButtonHidden = false,
             minimapButtonAngle = 200,
         },
@@ -469,6 +770,94 @@ end
 -- Zone-in prompt (RCLootCouncil model): on entering a raid instance as the loot
 -- master with no session running, offer to start one. Declining is remembered until
 -- we leave the raid, so it isn't re-asked on every loading screen inside the instance.
+StaticPopupDialogs["WEIRDLOOT_SAVE_WHITELIST_PRESET"] = {
+    text = "Save whitelist as preset. Enter a name:",
+    button1 = ACCEPT or "Save",
+    button2 = CANCEL or "Cancel",
+    hasEditBox = 1,
+    editBoxWidth = 200,
+    maxLetters = 40,
+    OnShow = function(self)
+        if self.editBox then self.editBox:SetText("") self.editBox:SetFocus() end
+    end,
+    OnAccept = function(self)
+        local name = self.editBox and self.editBox:GetText() or ""
+        name = string.match(name, "^%s*(.-)%s*$") or ""
+        if name == "" then return end
+        local text = (addon.ui and addon.ui.panels and addon.ui.panels.options and addon.ui.panels.options.whitelistBox
+            and addon.ui.panels.options.whitelistBox.editBox and addon.ui.panels.options.whitelistBox.editBox:GetText()) or ""
+        if addon:SaveCustomWhitelistPreset(name, text) then
+            if addon.RefreshWhitelistPresetDropdown then addon:RefreshWhitelistPresetDropdown(name) end
+        end
+    end,
+    EditBoxOnEnterPressed = function(self)
+        local parent = self:GetParent()
+        if parent and parent.button1 then parent.button1:Click() end
+    end,
+    EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+}
+
+StaticPopupDialogs["WEIRDLOOT_DELETE_WHITELIST_PRESET"] = {
+    text = "Delete custom whitelist preset \"%s\"?",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function(self, data)
+        if addon:DeleteCustomWhitelistPreset(data) then
+            if addon.RefreshWhitelistPresetDropdown then addon:RefreshWhitelistPresetDropdown(nil) end
+        end
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+}
+
+StaticPopupDialogs["WEIRDLOOT_SAVE_BLACKLIST_PRESET"] = {
+    text = "Save blacklist as preset. Enter a name:",
+    button1 = ACCEPT or "Save",
+    button2 = CANCEL or "Cancel",
+    hasEditBox = 1,
+    editBoxWidth = 200,
+    maxLetters = 40,
+    OnShow = function(self)
+        if self.editBox then self.editBox:SetText("") self.editBox:SetFocus() end
+    end,
+    OnAccept = function(self)
+        local name = self.editBox and self.editBox:GetText() or ""
+        name = string.match(name, "^%s*(.-)%s*$") or ""
+        if name == "" then return end
+        local text = (addon.ui and addon.ui.panels and addon.ui.panels.options and addon.ui.panels.options.blacklistBox
+            and addon.ui.panels.options.blacklistBox.editBox and addon.ui.panels.options.blacklistBox.editBox:GetText()) or ""
+        if addon:SaveCustomBlacklistPreset(name, text) then
+            if addon.RefreshBlacklistPresetDropdown then addon:RefreshBlacklistPresetDropdown(name) end
+        end
+    end,
+    EditBoxOnEnterPressed = function(self)
+        local parent = self:GetParent()
+        if parent and parent.button1 then parent.button1:Click() end
+    end,
+    EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+}
+
+StaticPopupDialogs["WEIRDLOOT_DELETE_BLACKLIST_PRESET"] = {
+    text = "Delete custom blacklist preset \"%s\"?",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function(self, data)
+        if addon:DeleteCustomBlacklistPreset(data) then
+            if addon.RefreshBlacklistPresetDropdown then addon:RefreshBlacklistPresetDropdown(nil) end
+        end
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+}
+
 StaticPopupDialogs["WEIRDLOOT_START_SESSION"] = {
     text = "Start a WeirdLoot session for this raid?",
     button1 = YES,
