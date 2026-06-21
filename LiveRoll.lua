@@ -159,6 +159,17 @@ local function buildLiveRollEntries(self, roll)
     return entries
 end
 
+function addon:GetLiveRollEntriesForItem(item)
+    if not item or not item.id then return nil end
+    local roll = self:GetActiveLiveRollForItem(item)
+    if not roll then return nil end
+    return buildLiveRollEntries(self, roll)
+end
+
+function addon:GetResponseLabel(tier)
+    return RESPONSE_LABELS[tier] or string.upper(tier or "")
+end
+
 local function ensureRollLinePool(f, count)
     f.rollLines = f.rollLines or {}
     while #f.rollLines < count do
