@@ -642,13 +642,22 @@ function addon:SetPlayerResponse(lotId, playerName, choice)
     if self:IsItemLocked(lotId) then
         return false
     end
+    choice = normalizeResponseChoice(choice)
+    -- Mirror the local player's own pick onto both surfaces (popup + loot tab) immediately, on any
+    -- client: a choice made from the loot tab reflects on the popup just as a popup click reflects
+    -- on the loot tab. The guard keeps a raider's relayed pick (recorded under their name on the ML)
+    -- from hijacking the ML's own highlighted button.
+    if self.ApplyLocalChoice
+        and util:NormalizeKey(playerName) == util:NormalizeKey(util:GetPlayerName("player")) then
+        self:ApplyLocalChoice(lotId, choice)
+    end
     -- Only the ML mutates the authoritative ledger. A raider sends its pick to the ML and
     -- waits for the snapshot to reflect it (mutating the local mirror would be overwritten).
     if not self:IsAuthorizedLootMaster() then
         self:SendSelection(lotId, choice)
         return true
     end
-    local applied = self.lootCore:SetResponse(lotId, util:NormalizeKey(playerName), normalizeResponseChoice(choice))
+    local applied = self.lootCore:SetResponse(lotId, util:NormalizeKey(playerName), choice)
     if applied then
         self:TriggerCallback("SESSION_UPDATED")
         if self.RefreshLiveRollCountForItem then

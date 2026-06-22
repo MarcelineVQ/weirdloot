@@ -1054,29 +1054,16 @@ function addon:BuildLootTab()
             GameTooltip:ClearLines()
             GameTooltip:AddLine("Players Rolling", 1, 0.82, 0)
 
-            -- Prefer the live pick-list (registrants kept current by RSTATE), so a raider sees who is
-            -- rolling in real time; fall back to the ledger responses when no roll is active. No roll
-            -- number is shown (rolls happen at resolution, not live), and your own line reads "You".
-            local entries = addon:GetLiveRollEntriesForItem(row.item)
-            if entries and #entries > 0 then
+            -- Same one source as the count and the popup: the live pick-list while a roll is active,
+            -- else the ledger responses. No roll number is shown (rolls happen at resolution).
+            local entries = addon:ActiveRollers(row.item.id)
+            if #entries == 0 then
+                GameTooltip:AddLine("No active rollers", 1, 1, 1)
+            else
                 for _, entry in ipairs(entries) do
                     GameTooltip:AddLine(string.format("%s - %s",
                         util:ColorPlayerName(entry.name, entry.className),
                         addon:GetResponseLabel(entry.tier)), 1, 1, 1)
-                end
-            else
-                local rollers = addon:BuildRollerList(addon.lootCore:Get(row.item.id)) or {}
-                table.sort(rollers, function(left, right)
-                    return string.lower(left.name or "") < string.lower(right.name or "")
-                end)
-                if #rollers == 0 then
-                    GameTooltip:AddLine("No active rollers", 1, 1, 1)
-                else
-                    for _, roller in ipairs(rollers) do
-                        GameTooltip:AddLine(string.format("%s - %s",
-                            util:ColorPlayerName(roller.name, roller.className),
-                            string.upper(roller.responseType or "pass")), 1, 1, 1)
-                    end
                 end
             end
 
@@ -2242,21 +2229,28 @@ function addon:RefreshLootTab()
         row.itemSlot:SetText(slotText)
         row.info:SetText(getLootItemInfoText(item))
 
-        -- Same source as the hover tooltip: the live pick-list while a roll is active, else the
-        -- ledger responses, so the count and the tooltip never disagree (notably on a raider, whose
-        -- ledger responses are coalesced but whose registrants are live via RSTATE).
-        local entries = self:GetLiveRollEntriesForItem(item)
-        local rollCount
-        if entries and #entries > 0 then
-            rollCount = #entries
-        else
-            rollCount = #(self:BuildRollerList(self.lootCore:Get(item.id)) or {})
-        end
-        row.state:SetText(string.format("%d rolling", rollCount))
+        -- ActiveRollers is the one roller source (shared with the hover tooltip and both popup
+        -- displays), so the count never disagrees across surfaces.
+        row.state:SetText(string.format("%d rolling", #self:ActiveRollers(item.id)))
     end)
     -- arm the shared resolve ticker if any name was still cold; it re-renders this list as the
     -- client caches them, then self-stops (same machinery the popups use).
     if self._lootNamesPending then self:EnsureNameTicker() end
+end
+
+-- Press the local player's chosen bracket on the visible loot row for a lot, without a full
+-- RefreshLootTab. This is what lets a popup pick light up the loot tab immediately even on a
+-- raider, whose own pick is whispered to the ML and is not in the local ledger (which is all
+-- RefreshLootTab can read) until the snapshot returns. ApplyLocalChoice drives both surfaces.
+function addon:MarkLocalLootChoice(lotId, tier)
+    local list = self.ui and self.ui.lootList
+    if not list or not list.rows then return end
+    for _, row in ipairs(list.rows) do
+        if row.item and row.item.id == lotId and row.choiceButtons then
+            updateLootChoiceButtons(row, tier)
+            return
+        end
+    end
 end
 
 function addon:RefreshRaidersTab()

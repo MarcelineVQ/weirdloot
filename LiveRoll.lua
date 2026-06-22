@@ -304,6 +304,17 @@ local function getPlayerClassName(self, playerKey)
     return ""
 end
 
+-- Order any roller list highest bracket first, then by name. Shared so the live registrant list
+-- and the ledger-backed list come out in the same order on every surface.
+local function rollerSort(left, right)
+    local leftRank = RESPONSE_ORDER[left.tier] or 0
+    local rightRank = RESPONSE_ORDER[right.tier] or 0
+    if leftRank ~= rightRank then
+        return leftRank > rightRank
+    end
+    return string.lower(left.name or "") < string.lower(right.name or "")
+end
+
 -- The live pick-list shows only who is in and their bracket. There is no live roll value: rolls are
 -- not made as you go (a misclick would lock you into a wrong number), they are generated once when
 -- the loot master resolves the lot. So entries carry no roll, and the list orders by bracket then name.
@@ -320,17 +331,26 @@ local function buildLiveRollEntries(self, roll)
             }
         end
     end
-
-    table.sort(entries, function(left, right)
-        local leftRank = RESPONSE_ORDER[left.tier] or 0
-        local rightRank = RESPONSE_ORDER[right.tier] or 0
-        if leftRank ~= rightRank then
-            return leftRank > rightRank
-        end
-        return string.lower(left.name or "") < string.lower(right.name or "")
-    end)
-
+    table.sort(entries, rollerSort)
     return entries
+end
+
+-- The one source for every "who is rolling" view: popup count + hover, loot-tab count + hover.
+-- Returns normalized { name, className, tier } ordered by bracket then name. A raider trusts the
+-- ML's live registrant push (RSTATE) while a roll is active, since its own ledger responses are
+-- coalesced until resolve; the ML and any pre-roll read take the authoritative ledger, which
+-- carries BOTH popup and loot-tab picks, so a prefired loot-tab pick counts before any registrant
+-- exists. This is why a popup count that read only registrants showed "none" for prefired rolls.
+function addon:ActiveRollers(lotId)
+    if not lotId then return {} end
+    local roll = self.live and self.live.rolls and self.live.rolls[lotId]
+    if roll and not roll.resolved and not self:IsAuthorizedLootMaster() then
+        return buildLiveRollEntries(self, roll)
+    end
+    local rollers = self:BuildRollerList(self.lootCore:Get(lotId)) or {}
+    for _, r in ipairs(rollers) do r.tier = r.responseType end
+    table.sort(rollers, rollerSort)
+    return rollers
 end
 
 function addon:GetLiveRollEntriesForItem(item)
@@ -386,7 +406,7 @@ local function showRollCountTooltip(self, f)
     GameTooltip:ClearLines()
     GameTooltip:AddLine("Players Rolling", 1, 0.82, 0)
 
-    local entries = buildLiveRollEntries(self, roll)
+    local entries = self:ActiveRollers(roll.id)
     if #entries == 0 then
         GameTooltip:AddLine("No active rollers", 1, 1, 1)
     else
@@ -606,6 +626,20 @@ local function highlightInterestButton(f, tier)
             styleButtonText(btn, chosen, not btn:IsEnabled())
         end
     end
+end
+
+-- Reflect the local player's own pick on BOTH surfaces at once: the open roll popup and the loot
+-- tab row. One path for both directions -- the popup buttons and a loot-tab pick (via
+-- SetPlayerResponse) both route here -- so a choice made on either surface lights up the matching
+-- button on the other, without waiting on the ledger (a raider's own pick is whispered to the ML
+-- and is not in the local ledger until the snapshot returns). nil/pass clears the highlight.
+function addon:ApplyLocalChoice(lotId, tier)
+    local roll = self.live and self.live.rolls and self.live.rolls[lotId]
+    if roll and not roll.resolved then
+        roll.choice = (tier and tier ~= "pass") and tier or nil
+        if roll.popup then highlightInterestButton(roll.popup, roll.choice) end
+    end
+    if self.MarkLocalLootChoice then self:MarkLocalLootChoice(lotId, tier) end
 end
 
 local function makePopup()
@@ -936,7 +970,11 @@ function addon:ShowInterestPopup(roll, slot)
         f.resultHover:SetScript("OnLeave", nil)
     end
 
-    roll.choice = nil
+    -- seed the local player's prior pick: a prefired loot-tab choice lives on the lot before the
+    -- roll starts, so the popup opens with that bracket already highlighted (RefreshInterestPopup
+    -- re-asserts it below from roll.choice).
+    local mine = self:GetPlayerResponse(roll.id, util:GetPlayerName("player"))
+    roll.choice = (mine and mine ~= "pass") and mine or nil
     f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = roll.link
     f.name:SetText(formatRollItemLabel(roll.link, roll.name, roll.quantity))
@@ -1008,23 +1046,12 @@ function addon:RefreshInterestPopup(roll)
     local f = roll and roll.popup
     if not f or f.mode ~= "interest" then return end
 
-    -- The ML counts the authoritative responses on the core lot; a raider counts the live pick
-    -- list the ML pushes via RSTATE (display-only registrants). Raiders do not carry the ledger's
-    -- responses mid-roll (picks are coalesced and only sync at resolve), so the count and the
-    -- hover roster both come from the pushed registrants on that side.
-    local total
-    if roll.owner then
-        total = 0
-        local lot = self.lootCore:Get(roll.id)
-        if lot then
-            for _, choice in pairs(lot.responses) do
-                if self:IsResponseActive(choice) then total = total + 1 end
-            end
-        end
-    else
-        total = #buildLiveRollEntries(self, roll)
-    end
+    -- count and highlight share the one roller source (ActiveRollers), so the popup never disagrees
+    -- with the loot tab; the local player's own pick is re-asserted from roll.choice, kept current
+    -- by both the popup buttons and loot-tab picks (ApplyLocalChoice).
+    local total = #self:ActiveRollers(roll.id)
     f.count:SetText(total > 0 and (total .. " rolling") or "")
+    highlightInterestButton(f, roll.choice)
     refreshPopupRollLines(self, roll)
 end
 
@@ -1053,15 +1080,15 @@ function addon:ChooseInterest(roll, tier)
         return
     end
     self:SendInterest(roll.id, tier)
-    roll.choice = tier
 
     if tier == "pass" and not roll.owner then
+        roll.choice = nil
         self:CloseInterestPopup(roll)
         compactPopups(self)
         return
     end
 
-    if roll.popup then highlightInterestButton(roll.popup, tier) end
+    self:ApplyLocalChoice(roll.id, tier)
     if roll.owner then self:RefreshInterestPopup(roll) end
 end
 
