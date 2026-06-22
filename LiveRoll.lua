@@ -143,9 +143,30 @@ function addon:SyncPendingPopups()
     -- drives rolls from the loot tab, so do not auto-surface. SKIPPED/IDLE are deliberately left:
     -- Skip must stick until a real new drop re-freshens the lot (-> NEW), and IDLE is the not-fresh
     -- state. mint always rides a Reconcile -> ledgerChanged, so freshly minted lots land here too.
-    if self.db and self.db.autoRoll then
+    local optAutoSkip = self.db and self.db.options and self.db.options.autoSkipRoll
+    if self.db and self.db.autoRoll and not optAutoSkip then
+        -- Auto-roll: every fresh lot goes straight to ROLLING via StartLiveRoll, which surfaces
+        -- the lot if needed and broadcasts the DROP to the raid. Collect the NEW lot ids first
+        -- (StartLiveRoll fires ledgerChanged -> re-enters this function), then start each: the
+        -- already-started lots are no longer NEW on re-entry so we don't double-broadcast.
+        local toStart = {}
         for _, lot in ipairs(core:List()) do
-            if lot.state == core.STATE.NEW then core:Surface(lot.id) end
+            if lot.state == core.STATE.NEW then toStart[#toStart + 1] = lot.id end
+        end
+        for _, lotId in ipairs(toStart) do
+            local cur = core:Get(lotId)
+            if cur and cur.state == core.STATE.NEW then
+                self:StartLiveRoll(lotId)
+            end
+        end
+    elseif optAutoSkip then
+        -- Auto-skip: every fresh lot goes straight to SKIPPED. Skipped lots resurface on the next
+        -- scan, so the ML can revisit later from the Loot tab; the popup never opens unattended.
+        for _, lot in ipairs(core:List()) do
+            if lot.state == core.STATE.NEW then
+                core:Surface(lot.id)
+                core:Skip(lot.id)
+            end
         end
     end
 
@@ -799,6 +820,11 @@ layoutPopups = function(self)
 end
 
 local function addActivePopup(self, f, preferredSlot)
+    -- Guard: a frame that is already in the active list (e.g. a pending popup transforming to
+    -- interest in place) keeps its existing slot and is not double-appended.
+    for _, existing in ipairs(self.live.active) do
+        if existing == f then return end
+    end
     local used = {}
     for _, other in ipairs(self.live.active) do
         if other.slot then used[other.slot] = true end
@@ -962,18 +988,24 @@ function addon:ShowInterestPopup(roll, slot)
     if not roll.owner and shouldSuppressPopup(self, roll.name) then
         return
     end
-    -- Idempotent per lot: replace any existing interest popup for this roll so a DROP and a
-    -- restore (in either order) never stack two popups for the same item.
-    for i = #self.live.active, 1, -1 do
-        local f = self.live.active[i]
-        if f.mode == "interest" and f.rollId == roll.id then
-            self:ClosePendingFrame(f)
+    -- Reuse-or-acquire: an existing popup tied to this lot id (either a pending popup
+    -- transforming in place, or an earlier interest popup for the same roll) is reused so the
+    -- Start/End button is the SAME visual button across the transition. Otherwise pull a fresh
+    -- frame from the pool.
+    local f
+    for _, candidate in ipairs(self.live.active) do
+        if candidate.lotId == roll.id or candidate.rollId == roll.id then
+            f = candidate
+            break
         end
     end
-    local f = acquirePopup(self)
+    if not f then
+        f = acquirePopup(self)
+    end
     f.roll = roll
     roll.popup = f
     f.mode = "interest"
+    f.lotId = roll.id   -- keep both attributes consistent so the reuse lookup works either way
     if f.resultHover then
         f.resultHover:Hide()
         f.resultHover:SetScript("OnEnter", nil)
@@ -1013,8 +1045,8 @@ function addon:ShowInterestPopup(roll, slot)
         f.rollBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
         f.rollBtn:SetScript("OnClick", function() self:ResolveLiveRoll(roll.id) end)
         f.cancelBtn:Show()
-        f.cancelBtn:SetWidth(46)
-        f.cancelBtn:SetText("Cancel")
+        f.cancelBtn:SetWidth(24)
+        f.cancelBtn:SetText("X")
         f.cancelBtn:ClearAllPoints()
         f.cancelBtn:SetPoint("RIGHT", f.rollBtn, "LEFT", -4, 0)
         f.cancelBtn:SetScript("OnClick", function() self:CancelLiveRoll(roll.id) end)
@@ -1163,7 +1195,12 @@ function addon:ShowPendingPopup(lot, slot)
     f.rollBtn:ClearAllPoints()
     f.rollBtn:SetPoint("RIGHT", f.cancelBtn, "LEFT", -4, 0)
     f.rollBtn:SetScript("OnClick", function()
-        closePopup(self, f)
+        -- Transform this pending popup into an interest popup in place: flip f.mode BEFORE
+        -- StartLiveRoll mutates the ledger so the ledgerChanged -> SyncPendingPopups close path
+        -- (which only kills mode == "pending" frames) leaves this one alone. StartLiveRoll's
+        -- ShowInterestPopup then finds the SAME frame via the lot-id lookup and re-skins it,
+        -- so Start and End are the same physical button across the transition.
+        f.mode = "interest"
         self:StartLiveRoll(lotId)
     end)
 

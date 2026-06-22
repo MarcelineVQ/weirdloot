@@ -3497,7 +3497,7 @@ end
 function addon:PLAYER_LOGIN()
     WeirdLootDB = ensureDefaults(WeirdLootDB, {
         testMode = false,        -- in-city testing: treat ANY bag item as session loot
-        autoRoll = true,         -- newly-looted/traded-in items auto-start a live roll
+        autoRoll = false,        -- newly-looted/traded-in items auto-start a live roll (default OFF)
         config = {
             rosterImportText = defaultRosterImportText,
             rosterEntries = addon.defaultRosterEntries,
@@ -3513,6 +3513,8 @@ function addon:PLAYER_LOGIN()
             resultPopupAutoCloseSeconds = 15,
             rollDuration = 30,
             rollBatchSize = 5,
+            autoSkipRoll = false,   -- LM only; mutually exclusive with db.autoRoll. When ON, new loot
+                                    -- moves straight to SKIPPED (auto-resurfaces on the next scan).
             whitelistEnabled = false,
             whitelistText = "",
             blacklistEnabled = false,
@@ -3714,6 +3716,20 @@ StaticPopupDialogs["WEIRDLOOT_DELETE_BLACKLIST_PRESET"] = {
     hideOnEscape = 1,
 }
 
+StaticPopupDialogs["WEIRDLOOT_END_SESSION"] = {
+    text = "End the current WeirdLoot session and clear its state?",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function()
+        addon:ClearSession()
+        addon:Print("Loot session ended.")
+    end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+    showAlert = 1,
+}
+
 StaticPopupDialogs["WEIRDLOOT_START_SESSION"] = {
     text = "Start a WeirdLoot session for this raid?",
     button1 = YES,
@@ -3871,7 +3887,21 @@ function addon:HandleSlashCommand(msg)
         self:HandleDebugCommand(rest)
     elseif command == "autoroll" then
         self.db.autoRoll = not self.db.autoRoll
+        if self.db.autoRoll and self.db.options then
+            self.db.options.autoSkipRoll = false   -- mutex with auto-skip
+        end
         self:Print("Auto-roll on new loot " .. (self.db.autoRoll and "ON." or "OFF (right-click an item to roll manually)."))
+        if self.RefreshOptionsTab then self:RefreshOptionsTab() end
+    elseif command == "autoskip" then
+        self.db.options = self.db.options or {}
+        self.db.options.autoSkipRoll = not self.db.options.autoSkipRoll
+        if self.db.options.autoSkipRoll then
+            self.db.autoRoll = false               -- mutex with auto-roll
+        end
+        self:Print("Auto-skip new loot " .. (self.db.options.autoSkipRoll
+            and "ON (new loot lands as Skipped; revisit from the loot tab)."
+            or "OFF."))
+        if self.RefreshOptionsTab then self:RefreshOptionsTab() end
     elseif command == "deer" or string.sub(command, 1, 5) == "deer " then
         local name = string.match(string.trim(msg or ""), "^%S+%s+(.+)$")
         if name and string.trim(name) ~= "" then
@@ -3881,6 +3911,7 @@ function addon:HandleSlashCommand(msg)
             self.db.deer = nil
             self:Print("Disenchanter cleared.")
         end
+        if self.RefreshOptionsTab then self:RefreshOptionsTab() end
     else
         self:ToggleMainFrame()
     end

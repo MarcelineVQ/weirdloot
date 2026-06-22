@@ -263,7 +263,7 @@ local function createLootChoiceButton(parent, label, width)
     button.glow = button:CreateTexture(nil, "OVERLAY")
     button.glow:SetTexture(GROUP_LOOT_TEXTURES.glow)
     button.glow:SetBlendMode("ADD")
-    button.glow:SetAlpha(0.9)
+    button.glow:SetAlpha(0.2)
     button.glow:SetPoint("CENTER", button, "CENTER", 0, 0)
     button.glow:SetWidth((width or 28) + 22)
     button.glow:SetHeight(34)
@@ -1556,8 +1556,14 @@ function addon:BuildMasterTab()
         addon:StartLootSession()
     end)
 
+    local endSessionButton = createButton(panel, "End Session", 120, 24)
+    endSessionButton:SetPoint("LEFT", startButton, "RIGHT", 8, 0)
+    endSessionButton:SetScript("OnClick", function()
+        StaticPopup_Show("WEIRDLOOT_END_SESSION")
+    end)
+
     local scanButton = createButton(panel, "Scan Bags", 120, 24)
-    scanButton:SetPoint("LEFT", startButton, "RIGHT", 8, 0)
+    scanButton:SetPoint("LEFT", endSessionButton, "RIGHT", 8, 0)
     scanButton:SetScript("OnClick", function()
         addon:RefreshSessionItems(true)
     end)
@@ -1617,6 +1623,7 @@ function addon:BuildMasterTab()
     end)
 
     panel.startButton = startButton
+    panel.endSessionButton = endSessionButton
     panel.scanButton = scanButton
     panel.processButton = processButton
     panel.unlockButton = unlockButton
@@ -1711,6 +1718,45 @@ local function createNumberEditBox(parent, width)
     return bg
 end
 
+local function createTextEditBox(parent, width)
+    local w = width or 140
+    local h = 20
+
+    local bg = CreateFrame("Frame", nil, parent)
+    elevateInteractiveFrame(bg, parent, 8)
+    bg:SetWidth(w)
+    bg:SetHeight(h)
+    bg:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = false,
+        edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    bg:SetBackdropColor(0, 0, 0, 0.7)
+    bg:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+
+    local box = CreateFrame("EditBox", nil, bg)
+    elevateInteractiveFrame(box, bg, 1)
+    box:SetPoint("TOPLEFT", bg, "TOPLEFT", 6, -2)
+    box:SetPoint("BOTTOMRIGHT", bg, "BOTTOMRIGHT", -6, 2)
+    box:SetFontObject(GameFontHighlight)
+    box:SetJustifyH("LEFT")
+    box:SetAutoFocus(false)
+    box:SetMaxLetters(20)
+    box:SetScript("OnEscapePressed", function(selfBox) selfBox:ClearFocus() end)
+    box:SetScript("OnEnterPressed", function(selfBox) selfBox:ClearFocus() end)
+
+    bg.editBox = box
+    bg.SetText = function(_, text) box:SetText(text or "") end
+    bg.GetText = function() return box:GetText() end
+    bg.SetScript = function(_, scriptType, fn) box:SetScript(scriptType, fn) end
+    bg.SetFocus = function() box:SetFocus() end
+    bg.ClearFocus = function() box:ClearFocus() end
+
+    return bg
+end
+
 local multilineScrollSeq = 0
 local function createMultilineEditScroll(parent, width, height)
     multilineScrollSeq = multilineScrollSeq + 1
@@ -1776,10 +1822,18 @@ function addon:BuildOptionsTab()
 
     panel.title = createLabel(panel, "Options", "TOPLEFT", panel, "TOPLEFT", 12, -12)
     panel.title:SetFontObject(GameFontHighlightLarge)
+    panel.title:SetTextColor(1, 0.82, 0)
+
+    local titleDivider = panel:CreateTexture(nil, "ARTWORK")
+    titleDivider:SetTexture("Interface\\Buttons\\WHITE8x8")
+    titleDivider:SetVertexColor(0.5, 0.4, 0.1, 0.6)
+    titleDivider:SetHeight(1)
+    titleDivider:SetPoint("TOPLEFT", panel.title, "BOTTOMLEFT", 0, -4)
+    titleDivider:SetPoint("RIGHT", panel, "RIGHT", -40, 0)
 
     -- Result popup auto-close
     local autoCloseCB = createOptionsCheckbox(panel, "Auto-close winner popup after")
-    autoCloseCB:SetPoint("TOPLEFT", panel.title, "BOTTOMLEFT", 0, -16)
+    autoCloseCB:SetPoint("TOPLEFT", titleDivider, "BOTTOMLEFT", 0, -14)
     autoCloseCB:SetChecked(opt.resultPopupAutoCloseEnabled and true or false)
 
     local autoCloseSeconds = createNumberEditBox(panel, 40)
@@ -1808,9 +1862,23 @@ function addon:BuildOptionsTab()
     end)
     applyAutoCloseColor()
 
+    -- ============================================================
+    -- Loot Master Options (anchored to the BOTTOM of the panel, after the blacklist box)
+    -- ============================================================
+    local lmHeader = createLabel(panel, "Loot Master Options", "TOPLEFT", panel, "TOPLEFT", 12, 0)
+    lmHeader:SetFontObject(GameFontHighlightLarge)
+    lmHeader:SetTextColor(1, 0.82, 0)
+
+    local lmDivider = panel:CreateTexture(nil, "ARTWORK")
+    lmDivider:SetTexture("Interface\\Buttons\\WHITE8x8")
+    lmDivider:SetVertexColor(0.5, 0.4, 0.1, 0.6)
+    lmDivider:SetHeight(1)
+    lmDivider:SetPoint("TOPLEFT", lmHeader, "BOTTOMLEFT", 0, -4)
+    lmDivider:SetPoint("RIGHT", panel, "RIGHT", -40, 0)
+
     -- Roll duration (loot master)
-    local rollDurLabel = createLabel(panel, "Roll duration (seconds, loot master only):",
-        "TOPLEFT", autoCloseCB, "BOTTOMLEFT", 0, -20)
+    local rollDurLabel = createLabel(panel, "Roll duration (seconds):",
+        "TOPLEFT", lmDivider, "BOTTOMLEFT", 0, -14)
     local rollDurBox = createNumberEditBox(panel, 50)
     rollDurBox:SetPoint("LEFT", rollDurLabel, "RIGHT", 12, 0)
     rollDurBox:SetText(tostring(opt.rollDuration or 20))
@@ -1824,7 +1892,7 @@ function addon:BuildOptionsTab()
     end)
 
     -- Start Rolls batch size (loot master)
-    local batchLabel = createLabel(panel, "Start Rolls batch size (items rolled at once, loot master only):",
+    local batchLabel = createLabel(panel, "Start Rolls batch size (items rolled at once):",
         "TOPLEFT", rollDurLabel, "BOTTOMLEFT", 0, -20)
     local batchBox = createNumberEditBox(panel, 50)
     batchBox:SetPoint("LEFT", batchLabel, "RIGHT", 12, 0)
@@ -1838,16 +1906,64 @@ function addon:BuildOptionsTab()
         end
     end)
 
+    -- Auto-roll new loot (loot master). Mirrors /wl autoroll. Mutually exclusive with auto-skip.
+    local autoRollCB = createOptionsCheckbox(panel, "Auto-start a live roll when new loot lands in bags")
+    autoRollCB:SetPoint("TOPLEFT", batchLabel, "BOTTOMLEFT", 0, -16)
+    autoRollCB:SetChecked(self.db.autoRoll == true and not (opt.autoSkipRoll and true or false))
+
+    -- Auto-skip live rolls (loot master). Mutually exclusive with auto-roll: turning one on
+    -- forces the other off. Both off => the ML drives every roll manually from the loot tab.
+    local autoSkipCB = createOptionsCheckbox(panel, "Auto-skip a live roll when new loot lands in bags")
+    autoSkipCB:SetPoint("TOPLEFT", autoRollCB, "BOTTOMLEFT", 0, -8)
+    autoSkipCB:SetChecked(opt.autoSkipRoll and true or false)
+
+    autoRollCB:SetScript("OnClick", function(selfCB)
+        local checked = selfCB:GetChecked() and true or false
+        addon.db.autoRoll = checked
+        if checked then
+            getOptions(addon).autoSkipRoll = false
+            autoSkipCB:SetChecked(false)
+        end
+        addon:Print("Auto-roll on new loot " .. (addon.db.autoRoll and "ON." or "OFF (right-click an item to roll manually)."))
+    end)
+    autoSkipCB:SetScript("OnClick", function(selfCB)
+        local checked = selfCB:GetChecked() and true or false
+        getOptions(addon).autoSkipRoll = checked
+        if checked then
+            addon.db.autoRoll = false
+            autoRollCB:SetChecked(false)
+        end
+        addon:Print("Auto-skip new loot " .. (checked and "ON (new loot lands as Skipped; revisit from the loot tab)." or "OFF."))
+    end)
+
+    -- Designated disenchanter (loot master). Mirrors /wl deer <name>. Non-epic BoE items
+    -- routed through Master Loot go to this player's bags via GiveMasterLoot.
+    local deerLabel = createLabel(panel, "Designated disenchanter (non-epic BoE auto-routes here):",
+        "TOPLEFT", autoSkipCB, "BOTTOMLEFT", 0, -16)
+    local deerBox = createTextEditBox(panel, 160)
+    deerBox:SetPoint("LEFT", deerLabel, "RIGHT", 12, 0)
+    deerBox.editBox:SetText(self.db.deer or "")
+    deerBox.editBox:SetScript("OnEditFocusLost", function(selfBox)
+        local name = string.trim(selfBox:GetText() or "")
+        if name == "" then
+            addon.db.deer = nil
+            addon:Print("Disenchanter cleared.")
+        else
+            addon.db.deer = name
+            addon:Print("Disenchanter set to " .. name .. " (non-epic BoE auto-routes there).")
+        end
+    end)
+
     -- Explanation tooltips (e.g. roll-bracket descriptions on the popup + loot tab)
     local explanationTipsCB = createOptionsCheckbox(panel, "Show explanation tooltips (spell out the roll brackets, etc.)")
-    explanationTipsCB:SetPoint("TOPLEFT", batchLabel, "BOTTOMLEFT", 0, -20)
+    explanationTipsCB:SetPoint("TOPLEFT", autoCloseCB, "BOTTOMLEFT", 0, -20)
     explanationTipsCB:SetChecked(opt.explanationTooltipsEnabled ~= false)
     explanationTipsCB:SetScript("OnClick", function(selfCB)
         getOptions(addon).explanationTooltipsEnabled = selfCB:GetChecked() and true or false
     end)
 
     -- Whitelist
-    local whitelistCB = createOptionsCheckbox(panel, "Enable White List (Warning: You will ONLY see loot popups for items on this list)")
+    local whitelistCB = createOptionsCheckbox(panel, "Enable White List |cffff3030(Warning: You will ONLY see loot popups for items on this list)|r")
     whitelistCB:SetPoint("TOPLEFT", explanationTipsCB, "BOTTOMLEFT", 0, -24)
     whitelistCB:SetChecked(opt.whitelistEnabled and true or false)
     whitelistCB:SetScript("OnClick", function(selfCB)
@@ -1942,7 +2058,7 @@ function addon:BuildOptionsTab()
     end
 
     -- Blacklist
-    local blacklistCB = createOptionsCheckbox(panel, "Enable Black List (Warning: you will ONLY see loot popups for items NOT on this list)")
+    local blacklistCB = createOptionsCheckbox(panel, "Enable Black List |cffff3030(Warning: you will ONLY see loot popups for items NOT on this list)|r")
     blacklistCB:SetPoint("TOP", whitelistBox, "BOTTOM", 0, -16)
     blacklistCB:SetPoint("LEFT", panel, "LEFT", 12, 0)
     blacklistCB:SetChecked(opt.blacklistEnabled and true or false)
@@ -1975,8 +2091,15 @@ function addon:BuildOptionsTab()
     deleteBtn:SetPoint("LEFT", saveBtn, "RIGHT", 4, 0)
     deleteBtn:Disable()
 
+    local curatedNote = createLabel(panel,
+        "Curated presets are shown below, select CLASS to see main and offspec pieces, or SPEC to see only items useful for that spec.",
+        "TOPLEFT", presetDropdown, "BOTTOMLEFT", 16, -6)
+    curatedNote:SetWidth(560)
+    curatedNote:SetJustifyH("LEFT")
+    curatedNote:SetTextColor(0.85, 0.85, 0.85)
+
     local blacklistBox = createMultilineEditScroll(panel, 420, 110)
-    blacklistBox:SetPoint("TOPLEFT", presetDropdown, "BOTTOMLEFT", 16, -2)
+    blacklistBox:SetPoint("TOPLEFT", curatedNote, "BOTTOMLEFT", 0, -6)
     blacklistBox.editBox:SetText(opt.blacklistText or "")
     blacklistBox.editBox:SetScript("OnEditFocusLost", function(selfBox)
         getOptions(addon).blacklistText = selfBox:GetText() or ""
@@ -2037,10 +2160,10 @@ function addon:BuildOptionsTab()
         applyPreset(nil)
     end
 
-    -- Minimap button visibility
+    -- Minimap button visibility -- sits above the whitelist section (re-anchored below to land
+    -- above whitelistCB once that widget exists; see the re-anchor after explanationTipsCB).
     local minimapCB = createOptionsCheckbox(panel, "Show minimap button")
-    minimapCB:SetPoint("TOP", blacklistBox, "BOTTOM", 0, -18)
-    minimapCB:SetPoint("LEFT", panel, "LEFT", 12, 0)
+    minimapCB:SetPoint("TOPLEFT", panel, "TOPLEFT", 12, 0)
     minimapCB:SetChecked(not (opt.minimapButtonHidden and true or false))
     minimapCB:SetScript("OnClick", function(selfCB)
         local checked = selfCB:GetChecked() and true or false
@@ -2087,10 +2210,44 @@ function addon:BuildOptionsTab()
     end)
     UIDropDownMenu_SetText(anchorDrop, anchorText(opt.rollResultTooltipAnchor or "RIGHT"))
 
+    -- ============================================================
+    -- Final layout pass: positions widgets in the user-facing order
+    -- regardless of the creation order above. Anchor chain (top -> bottom):
+    --   Options title (already anchored to panel)
+    --   autoCloseCB
+    --   explanationTipsCB
+    --   anchorLabel + anchorDrop   (Roll result tooltip docking)
+    --   minimapCB
+    --   whitelistCB ... whitelistBox
+    --   blacklistCB ... blacklistBox
+    --   lmHeader + lmDivider       (Loot Master Options)
+    --   rollDurLabel + batchLabel + autoRollCB + autoSkipCB + deerLabel
+    -- The LM-section widgets keep their internal anchor chain; only the
+    -- top-level lmHeader anchor moves so the whole block lands at the bottom.
+    -- ============================================================
+    explanationTipsCB:ClearAllPoints()
+    explanationTipsCB:SetPoint("TOPLEFT", autoCloseCB, "BOTTOMLEFT", 0, -20)
+
+    anchorLabel:ClearAllPoints()
+    anchorLabel:SetPoint("TOPLEFT", explanationTipsCB, "BOTTOMLEFT", 0, -22)
+
+    minimapCB:ClearAllPoints()
+    minimapCB:SetPoint("TOPLEFT", anchorLabel, "BOTTOMLEFT", 0, -22)
+
+    whitelistCB:ClearAllPoints()
+    whitelistCB:SetPoint("TOPLEFT", minimapCB, "BOTTOMLEFT", 0, -22)
+
+    lmHeader:ClearAllPoints()
+    lmHeader:SetPoint("TOP", blacklistBox, "BOTTOM", 0, -28)
+    lmHeader:SetPoint("LEFT", panel, "LEFT", 12, 0)
+
     panel.autoCloseCB = autoCloseCB
     panel.autoCloseSeconds = autoCloseSeconds
     panel.rollDurBox = rollDurBox
     panel.rollBatchBox = batchBox
+    panel.autoRollCB = autoRollCB
+    panel.autoSkipCB = autoSkipCB
+    panel.deerEditBox = deerBox
     panel.whitelistCB = whitelistCB
     panel.whitelistBox = whitelistBox
     panel.whitelistPresetDropdown = wlPresetDropdown
@@ -2103,6 +2260,23 @@ function addon:BuildOptionsTab()
     panel.blacklistDeleteBtn = deleteBtn
     panel.minimapCB = minimapCB
     panel.anchorDrop = anchorDrop
+end
+
+-- Re-sync the options-tab widgets from db state. Called from the slash-command handlers so a
+-- toggle made on the command line is reflected in the open Options tab without a reload.
+function addon:RefreshOptionsTab()
+    local inner = self.ui and self.ui.optionsPanel
+    if not inner then return end
+    local opt = (self.db and self.db.options) or {}
+    if inner.autoRollCB then
+        inner.autoRollCB:SetChecked(self.db.autoRoll == true and not (opt.autoSkipRoll and true or false))
+    end
+    if inner.autoSkipCB then
+        inner.autoSkipCB:SetChecked(opt.autoSkipRoll and true or false)
+    end
+    if inner.deerEditBox and inner.deerEditBox.editBox then
+        inner.deerEditBox.editBox:SetText(self.db.deer or "")
+    end
 end
 
 local function positionMinimapButton(button)
@@ -2416,6 +2590,7 @@ function addon:RefreshMasterTab()
 
     if authorized then
         panel.startButton:Enable()
+        panel.endSessionButton:Enable()
         panel.scanButton:Enable()
         panel.processButton:Enable()
         panel.exportWinnersButton:Enable()
@@ -2427,6 +2602,7 @@ function addon:RefreshMasterTab()
         panel.payoutButton:Enable()
     else
         panel.startButton:Disable()
+        panel.endSessionButton:Disable()
         panel.scanButton:Disable()
         panel.processButton:Disable()
         panel.exportWinnersButton:Disable()
