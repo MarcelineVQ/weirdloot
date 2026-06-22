@@ -230,6 +230,15 @@ local POPUP_INTEREST_OWNER_H = 92       -- floor for the ML popup: its End Roll/
                                         -- of the item icon/name instead of overlapping (mis-clicks).
 local RESPONSE_ORDER = { bis = 5, ms = 4, mu = 3, os = 2, tm = 1, pass = 0 }
 local RESPONSE_LABELS = { bis = "BiS", ms = "MS", mu = "MU", os = "OS", tm = "TM", pass = "Pass" }
+-- Hover text spelling out each roll-choice bracket abbreviation.
+local CHOICE_TOOLTIPS = {
+    bis = "Best in Slot",
+    ms = "Main Spec Upgrade",
+    mu = "Minor Upgrade",
+    os = "Off Spec",
+    tm = "Transmog",
+    pass = "Pass",
+}
 -- ROLL_DURATION / getOptions / getRollDuration are declared at the top of the file so the
 -- core-driven restore path can reach them; the rest of the option helpers live here.
 local function parseItemList(text)
@@ -273,6 +282,17 @@ local function makeButton(parent, text, width)
     b:SetHeight(18)
     b:SetText(text)
     return b
+end
+
+-- Attach a static hover tooltip to a button. Reusable for any button, not just roll choices.
+local function setButtonTooltip(btn, text)
+    if not btn or not text then return end
+    btn:SetScript("OnEnter", function(b)
+        GameTooltip:SetOwner(b, "ANCHOR_RIGHT")
+        GameTooltip:SetText(text, 1, 0.82, 0, true)
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 end
 
 local function getPlayerDisplayName(self, playerKey)
@@ -667,6 +687,12 @@ local function makePopup()
     f.tmBtn:SetPoint("LEFT", f.osBtn, "RIGHT", 3, 0)
     f.passBtn = makeButton(f, "Pass", 42)
     f.passBtn:SetPoint("LEFT", f.tmBtn, "RIGHT", 3, 0)
+    setButtonTooltip(f.bisBtn, CHOICE_TOOLTIPS.bis)
+    setButtonTooltip(f.msBtn, CHOICE_TOOLTIPS.ms)
+    setButtonTooltip(f.muBtn, CHOICE_TOOLTIPS.mu)
+    setButtonTooltip(f.osBtn, CHOICE_TOOLTIPS.os)
+    setButtonTooltip(f.tmBtn, CHOICE_TOOLTIPS.tm)
+    setButtonTooltip(f.passBtn, CHOICE_TOOLTIPS.pass)
 
     -- control row (loot master): End Roll / Cancel on the left, OK (result mode) on the right
     f.rollBtn = makeButton(f, "End Roll", 56)

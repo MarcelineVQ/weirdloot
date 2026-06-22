@@ -15,12 +15,12 @@ local GROUP_LOOT_TEXTURES = {
 }
 
 local RESPONSE_BUTTONS = {
-    { key = "bis", label = "BiS", width = 30 },
-    { key = "ms", label = "MS", width = 26 },
-    { key = "mu", label = "MU", width = 26 },
-    { key = "os", label = "OS", width = 26 },
-    { key = "tm", label = "TM", width = 26 },
-    { key = "pass", label = "Pass", width = 34 },
+    { key = "bis", label = "BiS", width = 30, tooltip = "Best in Slot" },
+    { key = "ms", label = "MS", width = 26, tooltip = "Main Spec Upgrade" },
+    { key = "mu", label = "MU", width = 26, tooltip = "Minor Upgrade" },
+    { key = "os", label = "OS", width = 26, tooltip = "Off Spec" },
+    { key = "tm", label = "TM", width = 26, tooltip = "Transmog" },
+    { key = "pass", label = "Pass", width = 34, tooltip = "Pass" },
 }
 
 local function isItemUsableForPlayer(itemLink)
@@ -977,6 +977,12 @@ function addon:BuildLootTab()
         local previousButton
         for _, option in ipairs(RESPONSE_BUTTONS) do
             local responseButton = createLootChoiceButton(row, option.label, option.width)
+            responseButton:SetScript("OnEnter", function(b)
+                GameTooltip:SetOwner(b, "ANCHOR_RIGHT")
+                GameTooltip:SetText(option.tooltip, 1, 0.82, 0, true)
+                GameTooltip:Show()
+            end)
+            responseButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
             if not previousButton then
                 responseButton:SetPoint("LEFT", row.skipCancelButton, "RIGHT", 4, 0)
             else
