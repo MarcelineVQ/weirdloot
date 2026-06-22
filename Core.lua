@@ -3513,7 +3513,9 @@ function addon:PLAYER_LOGIN()
             resultPopupAutoCloseSeconds = 15,
             rollDuration = 30,
             rollBatchSize = 5,
-            autoSkipRoll = false,   -- LM only; mutually exclusive with db.autoRoll. When ON, new loot
+            autoStartRoll = false,  -- LM only; mutex with db.autoRoll and autoSkipRoll. New loot
+                                    -- broadcasts the DROP immediately (NEW -> ROLLING, no popup gate).
+            autoSkipRoll = false,   -- LM only; mutex with db.autoRoll and autoStartRoll. New loot
                                     -- moves straight to SKIPPED (auto-resurfaces on the next scan).
             whitelistEnabled = false,
             whitelistText = "",
@@ -3887,16 +3889,30 @@ function addon:HandleSlashCommand(msg)
         self:HandleDebugCommand(rest)
     elseif command == "autoroll" then
         self.db.autoRoll = not self.db.autoRoll
-        if self.db.autoRoll and self.db.options then
+        if self.db.autoRoll then
+            self.db.options = self.db.options or {}
+            self.db.options.autoStartRoll = false  -- mutex with auto-start
             self.db.options.autoSkipRoll = false   -- mutex with auto-skip
         end
-        self:Print("Auto-roll on new loot " .. (self.db.autoRoll and "ON." or "OFF (right-click an item to roll manually)."))
+        self:Print("Auto-roll (auto-open the Start/Skip pending popup) on new loot "
+            .. (self.db.autoRoll and "ON." or "OFF (lots stay in the loot tab; start them manually)."))
+        if self.RefreshOptionsTab then self:RefreshOptionsTab() end
+    elseif command == "autostart" then
+        self.db.options = self.db.options or {}
+        self.db.options.autoStartRoll = not self.db.options.autoStartRoll
+        if self.db.options.autoStartRoll then
+            self.db.autoRoll = false               -- mutex with auto-roll
+            self.db.options.autoSkipRoll = false   -- mutex with auto-skip
+        end
+        self:Print("Auto-start a live roll on new loot " .. (self.db.options.autoStartRoll
+            and "ON (broadcasts the DROP immediately, no Start/Skip popup)." or "OFF."))
         if self.RefreshOptionsTab then self:RefreshOptionsTab() end
     elseif command == "autoskip" then
         self.db.options = self.db.options or {}
         self.db.options.autoSkipRoll = not self.db.options.autoSkipRoll
         if self.db.options.autoSkipRoll then
             self.db.autoRoll = false               -- mutex with auto-roll
+            self.db.options.autoStartRoll = false  -- mutex with auto-start
         end
         self:Print("Auto-skip new loot " .. (self.db.options.autoSkipRoll
             and "ON (new loot lands as Skipped; revisit from the loot tab)."

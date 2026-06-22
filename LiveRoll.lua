@@ -143,12 +143,17 @@ function addon:SyncPendingPopups()
     -- drives rolls from the loot tab, so do not auto-surface. SKIPPED/IDLE are deliberately left:
     -- Skip must stick until a real new drop re-freshens the lot (-> NEW), and IDLE is the not-fresh
     -- state. mint always rides a Reconcile -> ledgerChanged, so freshly minted lots land here too.
-    local optAutoSkip = self.db and self.db.options and self.db.options.autoSkipRoll
-    if self.db and self.db.autoRoll and not optAutoSkip then
-        -- Auto-roll: every fresh lot goes straight to ROLLING via StartLiveRoll, which surfaces
-        -- the lot if needed and broadcasts the DROP to the raid. Collect the NEW lot ids first
-        -- (StartLiveRoll fires ledgerChanged -> re-enters this function), then start each: the
-        -- already-started lots are no longer NEW on re-entry so we don't double-broadcast.
+    -- Three mutually-exclusive auto modes for fresh (NEW) loot. Default (all off) leaves NEW lots
+    -- in the loot tab so the ML drives every roll manually from there.
+    --   autoRoll       -> Surface only (NEW -> PENDING). Opens the Start/Skip pending popup.
+    --   autoStartRoll  -> StartLiveRoll (NEW -> ROLLING). Broadcasts the DROP immediately, no popup gate.
+    --   autoSkipRoll   -> Surface + Skip (NEW -> SKIPPED). No popup; revisit from the loot tab later.
+    local opt = (self.db and self.db.options) or {}
+    local optAutoStart = opt.autoStartRoll
+    local optAutoSkip = opt.autoSkipRoll
+    if optAutoStart and not optAutoSkip then
+        -- Collect NEW lot ids first (StartLiveRoll fires ledgerChanged -> re-enters this function),
+        -- then start each: already-started lots are no longer NEW on re-entry so no double-broadcast.
         local toStart = {}
         for _, lot in ipairs(core:List()) do
             if lot.state == core.STATE.NEW then toStart[#toStart + 1] = lot.id end
@@ -159,9 +164,11 @@ function addon:SyncPendingPopups()
                 self:StartLiveRoll(lotId)
             end
         end
+    elseif self.db and self.db.autoRoll and not optAutoSkip then
+        for _, lot in ipairs(core:List()) do
+            if lot.state == core.STATE.NEW then core:Surface(lot.id) end
+        end
     elseif optAutoSkip then
-        -- Auto-skip: every fresh lot goes straight to SKIPPED. Skipped lots resurface on the next
-        -- scan, so the ML can revisit later from the Loot tab; the popup never opens unattended.
         for _, lot in ipairs(core:List()) do
             if lot.state == core.STATE.NEW then
                 core:Surface(lot.id)

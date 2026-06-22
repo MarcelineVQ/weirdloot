@@ -1906,32 +1906,53 @@ function addon:BuildOptionsTab()
         end
     end)
 
-    -- Auto-roll new loot (loot master). Mirrors /wl autoroll. Mutually exclusive with auto-skip.
-    local autoRollCB = createOptionsCheckbox(panel, "Auto-start a live roll when new loot lands in bags")
+    -- Three mutex auto-modes for new loot. Mirrors the slash commands /wl autoroll, /wl autostart,
+    -- /wl autoskip. Picking one forces the other two off; all three off means the LM drives every
+    -- roll manually from the Loot tab.
+    local autoRollCB = createOptionsCheckbox(panel, "Auto-open the pending Start/Skip popup when new loot lands in bags")
     autoRollCB:SetPoint("TOPLEFT", batchLabel, "BOTTOMLEFT", 0, -16)
-    autoRollCB:SetChecked(self.db.autoRoll == true and not (opt.autoSkipRoll and true or false))
+    autoRollCB:SetChecked(self.db.autoRoll == true)
 
-    -- Auto-skip live rolls (loot master). Mutually exclusive with auto-roll: turning one on
-    -- forces the other off. Both off => the ML drives every roll manually from the loot tab.
+    local autoStartCB = createOptionsCheckbox(panel, "Auto-start a live roll when new loot lands in bags (broadcasts immediately, no popup)")
+    autoStartCB:SetPoint("TOPLEFT", autoRollCB, "BOTTOMLEFT", 0, -8)
+    autoStartCB:SetChecked(opt.autoStartRoll and true or false)
+
     local autoSkipCB = createOptionsCheckbox(panel, "Auto-skip a live roll when new loot lands in bags")
-    autoSkipCB:SetPoint("TOPLEFT", autoRollCB, "BOTTOMLEFT", 0, -8)
+    autoSkipCB:SetPoint("TOPLEFT", autoStartCB, "BOTTOMLEFT", 0, -8)
     autoSkipCB:SetChecked(opt.autoSkipRoll and true or false)
 
     autoRollCB:SetScript("OnClick", function(selfCB)
         local checked = selfCB:GetChecked() and true or false
         addon.db.autoRoll = checked
         if checked then
+            getOptions(addon).autoStartRoll = false
             getOptions(addon).autoSkipRoll = false
+            autoStartCB:SetChecked(false)
             autoSkipCB:SetChecked(false)
         end
-        addon:Print("Auto-roll on new loot " .. (addon.db.autoRoll and "ON." or "OFF (right-click an item to roll manually)."))
+        addon:Print("Auto-roll (auto-open the Start/Skip pending popup) on new loot "
+            .. (checked and "ON." or "OFF (lots stay in the loot tab; start them manually)."))
+    end)
+    autoStartCB:SetScript("OnClick", function(selfCB)
+        local checked = selfCB:GetChecked() and true or false
+        getOptions(addon).autoStartRoll = checked
+        if checked then
+            addon.db.autoRoll = false
+            getOptions(addon).autoSkipRoll = false
+            autoRollCB:SetChecked(false)
+            autoSkipCB:SetChecked(false)
+        end
+        addon:Print("Auto-start a live roll on new loot " .. (checked
+            and "ON (broadcasts the DROP immediately, no Start/Skip popup)." or "OFF."))
     end)
     autoSkipCB:SetScript("OnClick", function(selfCB)
         local checked = selfCB:GetChecked() and true or false
         getOptions(addon).autoSkipRoll = checked
         if checked then
             addon.db.autoRoll = false
+            getOptions(addon).autoStartRoll = false
             autoRollCB:SetChecked(false)
+            autoStartCB:SetChecked(false)
         end
         addon:Print("Auto-skip new loot " .. (checked and "ON (new loot lands as Skipped; revisit from the loot tab)." or "OFF."))
     end)
@@ -2246,6 +2267,7 @@ function addon:BuildOptionsTab()
     panel.rollDurBox = rollDurBox
     panel.rollBatchBox = batchBox
     panel.autoRollCB = autoRollCB
+    panel.autoStartCB = autoStartCB
     panel.autoSkipCB = autoSkipCB
     panel.deerEditBox = deerBox
     panel.whitelistCB = whitelistCB
@@ -2269,7 +2291,10 @@ function addon:RefreshOptionsTab()
     if not inner then return end
     local opt = (self.db and self.db.options) or {}
     if inner.autoRollCB then
-        inner.autoRollCB:SetChecked(self.db.autoRoll == true and not (opt.autoSkipRoll and true or false))
+        inner.autoRollCB:SetChecked(self.db.autoRoll == true)
+    end
+    if inner.autoStartCB then
+        inner.autoStartCB:SetChecked(opt.autoStartRoll and true or false)
     end
     if inner.autoSkipCB then
         inner.autoSkipCB:SetChecked(opt.autoSkipRoll and true or false)
