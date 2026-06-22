@@ -3,6 +3,19 @@ local addon = WeirdLoot
 addon.util = {}
 local util = addon.util
 
+-- Canonical hover text for each roll-choice bracket abbreviation. One source so the live-roll
+-- popup and the loot tab spell out the same thing and never drift apart.
+-- TODO: these are user-facing English strings; move them into a proper localization module
+-- (alongside the other display strings) when one exists, instead of hard-coding them here.
+addon.RESPONSE_TOOLTIPS = {
+    bis = "Best in Slot",
+    ms = "Main Spec Upgrade",
+    mu = "Minor Upgrade",
+    os = "Off Spec",
+    tm = "Transmog",
+    pass = "Pass",
+}
+
 function string.trim(value)
     return (value or ""):match("^%s*(.-)%s*$")
 end

@@ -14,13 +14,15 @@ local GROUP_LOOT_TEXTURES = {
     glow = "Interface\\Buttons\\UI-ActionButton-Border",
 }
 
+-- Hover text comes from the shared addon.RESPONSE_TOOLTIPS (keyed by `key`), so the loot tab and
+-- the live popup never spell the brackets out differently.
 local RESPONSE_BUTTONS = {
-    { key = "bis", label = "BiS", width = 30, tooltip = "Best in Slot" },
-    { key = "ms", label = "MS", width = 26, tooltip = "Main Spec Upgrade" },
-    { key = "mu", label = "MU", width = 26, tooltip = "Minor Upgrade" },
-    { key = "os", label = "OS", width = 26, tooltip = "Off Spec" },
-    { key = "tm", label = "TM", width = 26, tooltip = "Transmog" },
-    { key = "pass", label = "Pass", width = 34, tooltip = "Pass" },
+    { key = "bis", label = "BiS", width = 30 },
+    { key = "ms", label = "MS", width = 26 },
+    { key = "mu", label = "MU", width = 26 },
+    { key = "os", label = "OS", width = 26 },
+    { key = "tm", label = "TM", width = 26 },
+    { key = "pass", label = "Pass", width = 34 },
 }
 
 local function isItemUsableForPlayer(itemLink)
@@ -978,8 +980,12 @@ function addon:BuildLootTab()
         for _, option in ipairs(RESPONSE_BUTTONS) do
             local responseButton = createLootChoiceButton(row, option.label, option.width)
             responseButton:SetScript("OnEnter", function(b)
+                -- A disabled bracket (locked item / class-disallowed) shows nothing; only an
+                -- available one spells itself out. Plain Buttons drop mouse scripts while disabled
+                -- anyway, but guard explicitly so intent does not hinge on that default.
+                if not b:IsEnabled() then return end
                 GameTooltip:SetOwner(b, "ANCHOR_RIGHT")
-                GameTooltip:SetText(option.tooltip, 1, 0.82, 0, true)
+                GameTooltip:SetText(addon.RESPONSE_TOOLTIPS[option.key], 1, 0.82, 0, true)
                 GameTooltip:Show()
             end)
             responseButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -1076,28 +1082,30 @@ function addon:BuildLootTab()
             GameTooltip:Hide()
         end)
 
-        row:SetScript("OnEnter", function(selfRow)
-            if not selfRow.item or not selfRow.item.link or selfRow.item.link == "" then
+        -- The item tooltip and item-link clicks (ctrl preview, shift link-insert, ML right-click to
+        -- start a roll) belong to the icon + name, not the whole row: hovering a button or an empty
+        -- column should not pop the item tooltip. A hitbox spanning the icon/name up to the Start
+        -- button carries them. Because it captures the mouse over that area it must also carry the
+        -- clicks -- a bare hover frame would swallow them from the row underneath.
+        local function showItemTooltip(anchor)
+            local item = row.item
+            if not item or not item.link or item.link == "" then
                 return
             end
-
-            GameTooltip:SetOwner(selfRow, "ANCHOR_LEFT")
-            GameTooltip:SetHyperlink(selfRow.item.link)
+            GameTooltip:SetOwner(anchor, "ANCHOR_LEFT")
+            GameTooltip:SetHyperlink(item.link)
             GameTooltip:Show()
-        end)
+        end
 
-        row:SetScript("OnLeave", function()
-            GameTooltip:Hide()
-        end)
-
-        row:SetScript("OnClick", function(selfRow, button)
-            if not selfRow.item or not selfRow.item.link or selfRow.item.link == "" then
+        local function handleItemClick(button)
+            local item = row.item
+            if not item or not item.link or item.link == "" then
                 return
             end
 
             if button == "RightButton" then
                 if addon:IsAuthorizedLootMaster() then
-                    addon:StartLiveRollFromItem(selfRow.item)
+                    addon:StartLiveRollFromItem(item)
                 end
                 return
             end
@@ -1107,7 +1115,7 @@ function addon:BuildLootTab()
             end
 
             if IsShiftKeyDown() and ChatEdit_GetActiveWindow() then
-                ChatEdit_InsertLink(selfRow.item.link)
+                ChatEdit_InsertLink(item.link)
                 return
             end
 
@@ -1115,16 +1123,31 @@ function addon:BuildLootTab()
             -- the standard modified-click behavior of item links everywhere else.
             if IsModifiedClick("DRESSUP") then
                 if DressUpItemLink then
-                    DressUpItemLink(selfRow.item.link)
+                    DressUpItemLink(item.link)
                 else
-                    GameTooltip:SetOwner(selfRow, "ANCHOR_NONE")
+                    GameTooltip:SetOwner(row, "ANCHOR_NONE")
                     GameTooltip:ClearAllPoints()
-                    GameTooltip:SetPoint("TOPRIGHT", selfRow, "TOPLEFT", -8, 0)
-                    GameTooltip:SetHyperlink(selfRow.item.link)
+                    GameTooltip:SetPoint("TOPRIGHT", row, "TOPLEFT", -8, 0)
+                    GameTooltip:SetHyperlink(item.link)
                     GameTooltip:Show()
                 end
             end
-        end)
+        end
+
+        row.itemHitbox = CreateFrame("Button", nil, row)
+        elevateInteractiveFrame(row.itemHitbox, row, 10)
+        row.itemHitbox:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        -- left edge + full row height from the row; right edge stops just before the Start button
+        row.itemHitbox:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
+        row.itemHitbox:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 0, 0)
+        row.itemHitbox:SetPoint("RIGHT", row.startStopButton, "LEFT", -2, 0)
+        row.itemHitbox:SetScript("OnEnter", function(selfBox) showItemTooltip(selfBox) end)
+        row.itemHitbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        row.itemHitbox:SetScript("OnClick", function(_, button) handleItemClick(button) end)
+
+        -- The row keeps the clicks for the area OUTSIDE the item hitbox (so ML right-click-to-start
+        -- still works across the wider row), but no longer owns the tooltip.
+        row:SetScript("OnClick", function(_, button) handleItemClick(button) end)
     end)
     list:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 0, -28)
     list:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -4, 4)

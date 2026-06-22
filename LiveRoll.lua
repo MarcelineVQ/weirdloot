@@ -230,15 +230,8 @@ local POPUP_INTEREST_OWNER_H = 92       -- floor for the ML popup: its End Roll/
                                         -- of the item icon/name instead of overlapping (mis-clicks).
 local RESPONSE_ORDER = { bis = 5, ms = 4, mu = 3, os = 2, tm = 1, pass = 0 }
 local RESPONSE_LABELS = { bis = "BiS", ms = "MS", mu = "MU", os = "OS", tm = "TM", pass = "Pass" }
--- Hover text spelling out each roll-choice bracket abbreviation.
-local CHOICE_TOOLTIPS = {
-    bis = "Best in Slot",
-    ms = "Main Spec Upgrade",
-    mu = "Minor Upgrade",
-    os = "Off Spec",
-    tm = "Transmog",
-    pass = "Pass",
-}
+-- Hover text spelling out each roll-choice bracket abbreviation (shared with the loot tab).
+local CHOICE_TOOLTIPS = addon.RESPONSE_TOOLTIPS
 -- ROLL_DURATION / getOptions / getRollDuration are declared at the top of the file so the
 -- core-driven restore path can reach them; the rest of the option helpers live here.
 local function parseItemList(text)
@@ -485,7 +478,8 @@ local function applyInterestButtonAvailability(self, f, roll)
         styleButtonText(btn, false, disabled)
         -- A disabled bracket button is genuinely unclickable; explain why on hover so the raider
         -- knows it is a class restriction, not a bug. SetMotionScriptsWhileDisabled lets the
-        -- OnEnter/OnLeave fire while the button is disabled.
+        -- OnEnter/OnLeave fire while the button is disabled. An enabled bracket instead spells out
+        -- its abbreviation. Owned here (not at creation) so the two states never clobber each other.
         btn:SetMotionScriptsWhileDisabled(true)
         if disabled then
             btn:SetScript("OnEnter", function(b)
@@ -495,8 +489,7 @@ local function applyInterestButtonAvailability(self, f, roll)
             end)
             btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
         else
-            btn:SetScript("OnEnter", nil)
-            btn:SetScript("OnLeave", nil)
+            setButtonTooltip(btn, CHOICE_TOOLTIPS[key])
         end
     end
 end
@@ -687,12 +680,9 @@ local function makePopup()
     f.tmBtn:SetPoint("LEFT", f.osBtn, "RIGHT", 3, 0)
     f.passBtn = makeButton(f, "Pass", 42)
     f.passBtn:SetPoint("LEFT", f.tmBtn, "RIGHT", 3, 0)
-    setButtonTooltip(f.bisBtn, CHOICE_TOOLTIPS.bis)
-    setButtonTooltip(f.msBtn, CHOICE_TOOLTIPS.ms)
-    setButtonTooltip(f.muBtn, CHOICE_TOOLTIPS.mu)
-    setButtonTooltip(f.osBtn, CHOICE_TOOLTIPS.os)
-    setButtonTooltip(f.tmBtn, CHOICE_TOOLTIPS.tm)
-    setButtonTooltip(f.passBtn, CHOICE_TOOLTIPS.pass)
+    -- The bracket hover tooltips are (re)attached per-open in applyInterestButtonAvailability,
+    -- which owns each button's enabled/disabled state: an enabled bracket spells out its name, a
+    -- disabled one explains the class restriction instead. Setting them here would be clobbered.
 
     -- control row (loot master): End Roll / Cancel on the left, OK (result mode) on the right
     f.rollBtn = makeButton(f, "End Roll", 56)
