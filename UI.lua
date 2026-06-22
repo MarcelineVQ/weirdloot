@@ -475,7 +475,7 @@ local function createScrollList(parent, name, rowCount, initializer)
         elevateInteractiveFrame(row, frame, 4)
         row:SetHeight(ROW_HEIGHT)
         row:SetPoint("LEFT", 6, 0)
-        row:SetPoint("RIGHT", -6, 0)
+        row:SetPoint("RIGHT", -26, 0)   -- stop short of the scrollbar gutter so rows never cover the bar
         if index == 1 then
             row:SetPoint("TOP", frame, "TOP", 0, -8)
         else
@@ -483,6 +483,14 @@ local function createScrollList(parent, name, rowCount, initializer)
         end
         initializer(row, index)
         frame.rows[index] = row
+    end
+
+    -- The FauxScroll scrollbar is a low-level child of the scroll frame; the interactive rows sit
+    -- above it (frame+4) and would otherwise occlude it, so it reads as "hidden behind the panel".
+    -- Lift the bar (its arrow buttons inherit) clear of the rows so it is visible and clickable.
+    local scrollBar = _G[frame.scroll:GetName() .. "ScrollBar"]
+    if scrollBar then
+        scrollBar:SetFrameLevel(frame:GetFrameLevel() + 6)
     end
 
     frame.update = function(totalCount, updater)
@@ -1360,7 +1368,9 @@ function addon:BuildResultsTab()
     panel:SetAllPoints(self.ui.content)
     self.ui.panels.results = panel
 
-    local list = createScrollList(panel, "WeirdLootResultsList", 16, function(row)
+    -- 21 rows fills the full-height list (content is ~532px; 24px row pitch) instead of leaving the
+    -- lower third of the panel as empty backdrop.
+    local list = createScrollList(panel, "WeirdLootResultsList", 21, function(row)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
         row.icon = row:CreateTexture(nil, "ARTWORK")
@@ -1368,10 +1378,12 @@ function addon:BuildResultsTab()
         row.icon:SetHeight(18)
         row.icon:SetPoint("LEFT", row, "LEFT", 4, 0)
 
+        -- icon(18) + name(264) + winner(170) + gaps fit inside the 520 list minus the scrollbar
+        -- gutter, so neither column runs under the bar.
         row.name = createLabel(row, "", "LEFT", row.icon, "RIGHT", 8, 0)
-        row.name:SetWidth(290)
+        row.name:SetWidth(264)
         row.winner = createLabel(row, "", "LEFT", row.name, "RIGHT", 12, 0)
-        row.winner:SetWidth(200)
+        row.winner:SetWidth(170)
 
         row:SetScript("OnEnter", function(selfRow)
             local result = selfRow.result
