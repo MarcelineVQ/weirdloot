@@ -153,6 +153,106 @@ local function renderRemoteRecord(lotId, itemId, count, winners)
     }
 end
 
+-- The result BREAKDOWN (who rolled which bracket and what, the prioritized roll-off, the winners
+-- with their rolls, plus the spec-priority / LC context) is the part of a resolved record the ML
+-- builds locally; the minimal wire above carries only winner names, so a raider never saw it. Pack
+-- the structured pieces into one extra lot field so a raider renders the SAME detail locally:
+-- class/spec/status come from the synced roster, item text from its own GetItemInfo (still no
+-- rendered text on the wire). This rides the normal reliable lot sync, not the popup fast path.
+-- Layered control-char delimiters, none of which is WeirdSync's field separator (char 30).
+local BLOB_PART = string.char(29)   -- top-level parts of the blob
+local BLOB_ROW = string.char(28)    -- rows within a list part
+local BLOB_COL = string.char(31)    -- columns within a row
+
+local function packRows(list, cols)
+    local rows = {}
+    for _, d in ipairs(list or {}) do
+        rows[#rows + 1] = table.concat(cols(d), BLOB_COL)
+    end
+    return table.concat(rows, BLOB_ROW)
+end
+
+local function splitBy(text, sep)
+    local out = {}
+    if text and text ~= "" then
+        for piece in (text .. sep):gmatch("(.-)" .. sep) do
+            out[#out + 1] = piece
+        end
+    end
+    return out
+end
+
+-- Pack a resolved record's structured breakdown (ML side). Empty string for a record with no parts.
+function addon:EncodeResultBlob(record)
+    if not record then return "" end
+    local parts = {
+        packRows(record.allRollerDetails, function(d)
+            return { d.name or "", d.responseType or "", d.rollText or "" }
+        end),
+        packRows(record.rollDetails, function(d)
+            return { d.name or "", tostring(d.roll or ""), d.auto and "1" or "", d.isNamed and "1" or "" }
+        end),
+        packRows(record.winnerDetails, function(d)
+            return { d.name or "", tostring(d.roll or ""), d.auto and "1" or "" }
+        end),
+        record.specPriorityText or "",
+        record.lcNamesText or "",
+        record.isLootCouncil and "1" or "",
+    }
+    return table.concat(parts, BLOB_PART)
+end
+
+-- Rebuild a full result record (raider side) from the minimal record plus the breakdown blob. Names
+-- ride the wire; class/spec/status are filled from this client's roster, and the detail text is
+-- rendered here through the SAME BuildResultDetail the ML uses, so the two read identically.
+local function renderRemoteRecordFull(self, lotId, itemId, count, winners, blob)
+    local record = renderRemoteRecord(lotId, itemId, count, winners)
+    local function profile(name)
+        return self:GetAttendee(name) or self:GetRosterProfile(name) or {}
+    end
+
+    local parts = splitBy(blob, BLOB_PART)
+
+    record.allRollerDetails = {}
+    for _, row in ipairs(splitBy(parts[1], BLOB_ROW)) do
+        local c = splitBy(row, BLOB_COL)
+        local prof = profile(c[1])
+        record.allRollerDetails[#record.allRollerDetails + 1] = {
+            name = c[1],
+            responseType = (c[2] ~= "" and c[2]) or nil,
+            rollText = (c[3] ~= "" and c[3]) or nil,
+            className = prof.className, specName = prof.specName, status = prof.status,
+        }
+    end
+
+    record.rollDetails = {}
+    for _, row in ipairs(splitBy(parts[2], BLOB_ROW)) do
+        local c = splitBy(row, BLOB_COL)
+        local prof = profile(c[1])
+        record.rollDetails[#record.rollDetails + 1] = {
+            name = c[1], roll = tonumber(c[2]), auto = c[3] == "1", isNamed = c[4] == "1",
+            className = prof.className, specName = prof.specName, status = prof.status,
+        }
+    end
+
+    record.winnerDetails = {}
+    for _, row in ipairs(splitBy(parts[3], BLOB_ROW)) do
+        local c = splitBy(row, BLOB_COL)
+        record.winnerDetails[#record.winnerDetails + 1] = {
+            name = c[1], roll = tonumber(c[2]), auto = c[3] == "1", className = profile(c[1]).className,
+        }
+    end
+
+    record.specPriorityText = (parts[4] ~= "" and parts[4]) or nil
+    record.lcNamesText = (parts[5] ~= "" and parts[5]) or nil
+    record.isLootCouncil = parts[6] == "1"
+    if record.isLootCouncil then
+        record.winnersText = "Loot Council"
+    end
+    record.detailText = self:BuildResultDetail(record)
+    return record
+end
+
 -- Seconds left on a rolling lot's countdown, from the ML's authoritative roll deadline. Sent so a
 -- raider restoring a roll popup shows the true time remaining (the ML closes it at the real end),
 -- not a fresh full duration. "" for non-rolling lots or when no deadline is known.
@@ -181,6 +281,8 @@ function addon:EncodeLot(lot)
         lot.removed and "1" or "",
         tostring(self.lootCore.seq or 0),   -- field 9: core seq (used by deltas; ignored in a full snapshot)
         self:RollRemaining(lot),            -- field 10: roll countdown seconds (rolling lots only)
+        -- field 11: full result breakdown (resolved lots only) so raiders see what the ML sees
+        (lot.state == self.lootCore.STATE.RESOLVED and lot.record) and self:EncodeResultBlob(lot.record) or "",
     }
 end
 
@@ -199,7 +301,14 @@ function addon:DecodeLot(fields)
         for _, w in ipairs(util:Split(fields[7] or "", ",")) do
             if w ~= "" then winners[#winners + 1] = w end
         end
-        lot.record = renderRemoteRecord(lot.id, lot.itemId, lot.count, winners)
+        -- field 11 carries the full breakdown; fall back to the minimal record when it is absent
+        -- (an older ML, or a lot synced before this field existed).
+        local blob = fields[11]
+        if blob and blob ~= "" then
+            lot.record = renderRemoteRecordFull(self, lot.id, lot.itemId, lot.count, winners, blob)
+        else
+            lot.record = renderRemoteRecord(lot.id, lot.itemId, lot.count, winners)
+        end
     end
     return lot
 end
