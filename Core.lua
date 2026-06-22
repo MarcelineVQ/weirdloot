@@ -3847,9 +3847,9 @@ function addon:PARTY_LOOT_METHOD_CHANGED()
 end
 
 function addon:BAG_UPDATE()
-    if self:OnBagUpdate() then
-        self:AutoBroadcastSession(false)
-    end
+    -- Coalesce the loot-time BAG_UPDATE burst into one scan; see ScheduleBagReconcile. Out-of-band
+    -- triggers (loot tab open, Start Roll, expiry timer) still run OnBagUpdate synchronously.
+    self:ScheduleBagReconcile()
 end
 
 function addon:PLAYER_REGEN_ENABLED()

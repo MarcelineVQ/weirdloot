@@ -628,6 +628,30 @@ function addon:ArmTradeExpiryTimer(seconds)
     end
 end
 
+-- Looting a corpse fires a burst of BAG_UPDATE events (one or more per item entering the bags), and a
+-- full OnBagUpdate is expensive on the ML: BuildTradeableEpicCounts renders a GameTooltip per epic in
+-- the bags to read its bind/trade lines, then projections rebuild and the session broadcasts. Running
+-- that whole pipeline once per event in the burst is the loot-time frame hitch. Coalesce it: each
+-- BAG_UPDATE just re-arms a short trailing deadline, and the scan runs ONCE after the bags go quiet.
+-- One scan against the pre-burst baseline is also exact for freshness, where partial mid-burst scans
+-- would smear the net-new set.
+local BAG_SETTLE = 0.20
+local bagDebounce = CreateFrame("Frame")
+bagDebounce:Hide()
+bagDebounce:SetScript("OnUpdate", function()
+    if not addon._bagReconcileAt or GetTime() < addon._bagReconcileAt then return end
+    addon._bagReconcileAt = nil
+    bagDebounce:Hide()
+    if addon:OnBagUpdate() then addon:AutoBroadcastSession(false) end
+end)
+
+-- Arm/re-arm the coalesced bag reconcile. Trailing debounce: the deadline pushes forward on every new
+-- BAG_UPDATE so the scan lands BAG_SETTLE after the last event, draining the whole loot sweep at once.
+function addon:ScheduleBagReconcile()
+    self._bagReconcileAt = GetTime() + BAG_SETTLE
+    bagDebounce:Show()
+end
+
 -- Re-scan bags and reconcile the ledger NOW (then broadcast any change), driven by triggers other
 -- than BAG_UPDATE: opening the loot tab, Start Roll, a periodic out-of-combat tick, and zone-in. A
 -- BoP trade window expiring fires no game event -- the item stays in bags, only its tooltip changes
