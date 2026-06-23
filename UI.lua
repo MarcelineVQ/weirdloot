@@ -936,7 +936,7 @@ function addon:BuildLootTab()
     panel.headerInfo = headerInfo
 
     local headerRollers = createButton(panel, "Rollers", 80, 18)
-    headerRollers:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 804, -12)
+    headerRollers:SetPoint("TOPLEFT", header, "BOTTOMLEFT", 760, -12)
     headerRollers:SetScript("OnClick", function() end)
     panel.headerRollers = headerRollers
 
@@ -1040,10 +1040,10 @@ function addon:BuildLootTab()
         row.itemSlot:SetWidth(54)
 
         row.info = createLabel(row, "", "LEFT", row, "LEFT", 608, 0)
-        row.info:SetWidth(188)
+        row.info:SetWidth(140)
 
-        row.state = createLabel(row, "", "LEFT", row, "LEFT", 804, 0)
-        row.state:SetWidth(50)
+        row.state = createLabel(row, "", "LEFT", row, "LEFT", 760, 0)
+        row.state:SetWidth(70)
         row.state:SetJustifyH("LEFT")
         row.stateHitbox = CreateFrame("Frame", nil, row)
         elevateInteractiveFrame(row.stateHitbox, row, 10)
@@ -1096,6 +1096,25 @@ function addon:BuildLootTab()
             local dialog = StaticPopup_Show("WEIRDLOOT_REROLL_ITEM", item.link or item.name or "this item")
             if dialog then
                 dialog.data = { lotId = item.id, itemLink = item.link }
+            end
+        end)
+
+        -- LC button (loot master only): set a session-scoped Loot Council priority for THIS item.
+        -- Sits immediately to the left of Reroll. The chosen priority overrides the persistent
+        -- named-items rule for the rest of the session; the LM still clicks Reroll to apply it.
+        -- Selected-state glow lights up while an override is set so the row reads at a glance.
+        row.lcButton = createLootChoiceButton(row, "LC", 28)
+        elevateInteractiveFrame(row.lcButton, row, 10)
+        row.lcButton:SetPoint("RIGHT", row.rerollButton, "LEFT", -4, 0)
+        row.lcButton:Hide()
+        row.lcButton:SetScript("OnClick", function()
+            local item = row.item
+            if not item or not item.name then return end
+            local rule = addon:GetSessionLCOverride(item.name)
+            local current = (rule and rule.raw) or ""
+            local dialog = StaticPopup_Show("WEIRDLOOT_SET_LC_OVERRIDE", item.link or item.name)
+            if dialog then
+                dialog.data = { itemName = item.name, itemLink = item.link, current = current }
             end
         end)
 
@@ -2483,6 +2502,15 @@ function addon:RefreshLootTab()
                 row.rerollButton:Show()
             else
                 row.rerollButton:Hide()
+            end
+        end
+        if row.lcButton then
+            if self:IsAuthorizedLootMaster() then
+                row.lcButton:Show()
+                local hasOverride = self:GetSessionLCOverride(item.name) ~= nil
+                setLootChoiceButtonState(row.lcButton, hasOverride)
+            else
+                row.lcButton:Hide()
             end
         end
     end)

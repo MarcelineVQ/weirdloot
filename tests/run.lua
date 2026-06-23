@@ -583,6 +583,63 @@ test("reroll: UnlockSessionRoll refuses when caller is not the loot master", fun
     eq(w.addon.lootCore:State(lot.id), "resolved", "lot state unchanged")
 end)
 
+test("LC override: SetSessionLCOverride routes through GetNamedRule and survives until ClearSession", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    -- Set an override BEFORE the item exists. GetNamedRule reads it back, parsed identically to
+    -- a persistent named rule (same shape: tiers[].entries[].playerKey).
+    local ok = w.addon:SetSessionLCOverride("Sand-Worn Band", "alpha/beta")
+    check(ok, "SetSessionLCOverride returned true")
+    local rule = w.addon:GetNamedRule("sand-worn band")
+    check(rule ~= nil, "GetNamedRule returns the override (case-insensitive)")
+    eq(rule and rule.raw, "alpha/beta", "rule.raw mirrors the input prio text")
+    eq(rule and rule.tiers and #rule.tiers, 1, "single tier (one '>' segment)")
+    eq(rule and rule.tiers[1] and #rule.tiers[1].entries, 2, "tier has two entries (alpha, beta)")
+    -- ClearSession nukes the override (session-scoped, not persisted).
+    w.addon:ClearSession()
+    check(w.addon:GetNamedRule("sand-worn band") == nil, "override wiped by ClearSession")
+end)
+
+test("LC override: ClearSessionLCOverride / blank input removes a single item's override", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon:SetSessionLCOverride("Gatekeeper", "alpha")
+    w.addon:SetSessionLCOverride("Heritage", "beta")
+    check(w.addon:GetSessionLCOverride("Gatekeeper") ~= nil, "Gatekeeper override set")
+    check(w.addon:GetSessionLCOverride("Heritage") ~= nil, "Heritage override set")
+    w.addon:ClearSessionLCOverride("Gatekeeper")
+    check(w.addon:GetSessionLCOverride("Gatekeeper") == nil, "Gatekeeper override cleared")
+    check(w.addon:GetSessionLCOverride("Heritage") ~= nil, "Heritage override untouched")
+end)
+
+test("LC override: empty / unparseable input refuses without disturbing existing override", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon:SetSessionLCOverride("Heritage", "alpha")
+    -- A whitespace-only priority (after the comma) yields zero tiers; the helper returns false.
+    local ok = w.addon:SetSessionLCOverride("Heritage", "   ,  ")
+    check(not ok, "unparseable input refused")
+    local rule = w.addon:GetNamedRule("Heritage")
+    eq(rule and rule.raw, "alpha", "prior override preserved on failed parse")
+end)
+
+test("LC override: takes precedence over a persistent named rule for the same item", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    -- Stage a persistent named rule the way Config does (key by NormalizeKey).
+    w.addon.config.namedRules = w.addon.config.namedRules or {}
+    local key = w.addon.util:NormalizeKey("Plague Igniter")
+    w.addon.config.namedRules[key] = {
+        itemName = "Plague Igniter", key = key, raw = "persistent",
+        tiers = { { index = 1, raw = "persistent", entries = { { raw = "persistent", playerKey = "persistent" } } } },
+    }
+    eq(w.addon:GetNamedRule("Plague Igniter").raw, "persistent", "baseline: persistent rule is in effect")
+    w.addon:SetSessionLCOverride("Plague Igniter", "session-winner")
+    eq(w.addon:GetNamedRule("Plague Igniter").raw, "session-winner", "session override wins over persistent rule")
+    w.addon:ClearSessionLCOverride("Plague Igniter")
+    eq(w.addon:GetNamedRule("Plague Igniter").raw, "persistent", "persistent rule re-emerges after override cleared")
+end)
+
 test("reroll: UnlockSessionRoll refuses when the lot is not resolved", function()
     local w = makeWorld("Masterlooter", true)
     startSession(w)

@@ -3718,6 +3718,46 @@ StaticPopupDialogs["WEIRDLOOT_DELETE_BLACKLIST_PRESET"] = {
     hideOnEscape = 1,
 }
 
+StaticPopupDialogs["WEIRDLOOT_SET_LC_OVERRIDE"] = {
+    text = "Session LC priority for %s\nFormat:  player1/player2  or  player1 > player2 > LC\nLeave blank to clear.",
+    button1 = ACCEPT or "Save",
+    button2 = CANCEL or "Cancel",
+    hasEditBox = 1,
+    editBoxWidth = 260,
+    maxLetters = 200,
+    OnShow = function(self)
+        local data = self.data
+        if self.editBox then
+            self.editBox:SetText((data and data.current) or "")
+            self.editBox:SetFocus()
+            self.editBox:HighlightText()
+        end
+        if data and data.itemLink and data.itemLink ~= "" then
+            GameTooltip:SetOwner(self, "ANCHOR_NONE")
+            GameTooltip:ClearAllPoints()
+            GameTooltip:SetPoint("TOPLEFT", self, "TOPRIGHT", 8, 0)
+            GameTooltip:SetHyperlink(data.itemLink)
+            GameTooltip:Show()
+        end
+    end,
+    OnAccept = function(self)
+        local data = self.data
+        local text = self.editBox and self.editBox:GetText() or ""
+        if data and data.itemName then
+            addon:SetSessionLCOverride(data.itemName, text)
+        end
+    end,
+    EditBoxOnEnterPressed = function(self)
+        local parent = self:GetParent()
+        if parent and parent.button1 then parent.button1:Click() end
+    end,
+    EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
+    OnHide = function() GameTooltip:Hide() end,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+}
+
 StaticPopupDialogs["WEIRDLOOT_REROLL_ITEM"] = {
     text = "Confirm you want to reroll %s",
     button1 = YES,

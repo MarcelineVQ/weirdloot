@@ -434,9 +434,50 @@ function addon:ClearSession()
     self.session.lockedItems = {}
     self.session.pendingLinks = {}
     self.session.prevEligible = {}
+    self.session.lcOverrides = {}        -- temporary LC priorities die with the session
     self.lootView = { items = {}, results = {} }
     self.lootCore:Reset()
     self:TriggerCallback("SESSION_UPDATED")
+end
+
+-- Session-scoped LC priority override for a single item. Parsed through the same machinery as
+-- the persistent namedRules, so the Resolver consumes it identically. Stored on self.session
+-- (not self.config) so it wipes when ClearSession runs. Authoritative on the ML; raiders don't
+-- need the rule because resolution is computed ML-side.
+function addon:SetSessionLCOverride(itemName, prioText)
+    if not itemName or itemName == "" then return false end
+    self.session.lcOverrides = self.session.lcOverrides or {}
+    local key = util:NormalizeKey(itemName)
+    prioText = string.trim(prioText or "")
+    if prioText == "" then
+        self.session.lcOverrides[key] = nil
+        self:Print("LC override cleared for " .. itemName .. ".")
+        self:TriggerCallback("SESSION_UPDATED")
+        return true
+    end
+    -- Reuse ParseTieredRuleText by synthesizing the standard "ItemName, prio" line. The parsed
+    -- rule has the same shape as a config.namedRules entry, so GetNamedRule can return it
+    -- transparently and the Resolver branches on it without special-casing.
+    local synthetic = itemName .. ", " .. prioText
+    local parsed = self:ParseTieredRuleText(synthetic, self.ParseNamedToken)
+    local rule = parsed[key]
+    if not rule or #rule.tiers == 0 then
+        self:Print("Could not parse LC priority: " .. prioText)
+        return false
+    end
+    self.session.lcOverrides[key] = rule
+    self:Print(string.format("LC override set for %s: %s", itemName, rule.raw))
+    self:TriggerCallback("SESSION_UPDATED")
+    return true
+end
+
+function addon:GetSessionLCOverride(itemName)
+    if not self.session or not self.session.lcOverrides then return nil end
+    return self.session.lcOverrides[util:NormalizeKey(itemName or "")]
+end
+
+function addon:ClearSessionLCOverride(itemName)
+    return self:SetSessionLCOverride(itemName, "")
 end
 
 function addon:GetCurrentSession()

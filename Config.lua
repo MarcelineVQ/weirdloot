@@ -860,6 +860,11 @@ function addon:GetLootRule(itemName)
 end
 
 function addon:GetNamedRule(itemName)
+    -- Session-scoped LC override wins when present: lets the loot master assign a one-off
+    -- priority on-the-fly (named raiders all absent, e.g.) without editing the persistent
+    -- named-items list. The override is wiped by ClearSession.
+    local override = self.GetSessionLCOverride and self:GetSessionLCOverride(itemName)
+    if override then return override end
     return self.config.namedRules[util:NormalizeKey(itemName or "")]
 end
 
