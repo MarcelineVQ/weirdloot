@@ -191,6 +191,20 @@ function Channel:OnReceive(sender, message)
     local f = decode(message)
     local t = f[1]
 
+    -- Authority binding: the snapshot frames (SB/SE/SD), deltas (D) and heartbeat (H) carry ledger
+    -- state, and we trust them ONLY from the current authority -- the peer's own loot master. A state
+    -- message from anyone else (a stale ML, or another group's loot master whose targeted WHISPER
+    -- snapshot crosses group boundaries) would be applied and leak a foreign ledger into ours: the
+    -- raider then mirrors loot from a group/session it is not in. Drop it. The request/ack handshake
+    -- (RQ/AK) is left open -- each is already gated by isAuthority -- so peer<->authority flows work.
+    if t == "SB" or t == "SE" or t == "SD" or t == "D" or t == "H" then
+        local auth = self.cb.authorityName()
+        if not auth or auth == "" or normName(sender) ~= normName(auth) then
+            self.cb.log("drop-foreign", { from = sender, t = t })
+            return
+        end
+    end
+
     if t == "SB" then
         self._incoming = {
             epoch = f[2],
@@ -207,6 +221,39 @@ function Channel:OnReceive(sender, message)
     elseif t == "SD" then
         local inc = self._incoming
         if not inc then return end
+        -- Epoch monotonicity: never adopt an OLDER session. Epochs are time()-stamped session ids, so a
+        -- smaller epoch is a stale session -- an authority that restored a long-lived old session, or a
+        -- leftover/backlogged broadcast from one. Adopting it sets appliedEpoch backward, which makes
+        -- every heartbeat from the CURRENT session read as an epoch mismatch (endless resync), and also
+        -- defeats the same-epoch rev guard below, because an old long-lived session can sit at a far
+        -- HIGHER rev than a fresh one (so rev comparison across epochs is meaningless). Reject a strictly
+        -- older epoch outright; equal or newer proceeds. Non-numeric epochs are never compared (accept).
+        local incE, curE = tonumber(inc.epoch), tonumber(self.appliedEpoch)
+        if incE and curE and incE < curE then
+            self.pendingRequest = nil
+            self._incoming = nil
+            self.cb.log("recv-snap-stale", { reason = "epoch", epoch = inc.epoch, curEpoch = self.appliedEpoch })
+            if inc.reqId then self:_send({ "AK", inc.reqId }, "WHISPER", sender, "ALERT") end
+            return
+        end
+        -- Never let a stale, backlogged snapshot move us BACKWARD. A snapshot is built at the authority's
+        -- rev when it answers a request, but it ships as one SB + N SE + SD through ChatThrottleLib, so a
+        -- large one is delivered seconds late -- by which time deltas may have already carried us past it.
+        -- Applying it then would regress lastRev AND replace the ledger with older state, re-tripping gap
+        -- detection on the next delta: a self-sustaining resync storm. Drop a same-epoch snapshot whose
+        -- rev is older than what we hold; still clear our request and ack so the authority stops retrying
+        -- this delivery. A NEW epoch (session rebaseline) or a first-ever sync (lastRev == nil) always
+        -- applies -- only a same-epoch backslide is rejected.
+        local sameEpoch = (self.appliedEpoch ~= nil and inc.epoch == self.appliedEpoch)
+        if sameEpoch and self.lastRev ~= nil and inc.rev < self.lastRev then
+            self.pendingRequest = nil
+            self._incoming = nil
+            self.cb.log("recv-snap-stale", { rev = inc.rev, lastRev = self.lastRev })
+            if inc.reqId then
+                self:_send({ "AK", inc.reqId }, "WHISPER", sender, "ALERT")
+            end
+            return
+        end
         self.cb.applySnapshot(inc.lines, inc.epoch)
         self.lastRev = inc.rev      -- a snapshot re-baselines the revision
         self.appliedEpoch = inc.epoch
@@ -235,6 +282,16 @@ function Channel:OnReceive(sender, message)
     elseif t == "RQ" then
         if not self.cb.isAuthority() then return end
         local reqId = f[3]
+        -- Coalesce per target: at most ONE snapshot in flight to a given peer. A peer retries the same
+        -- reqId (and re-requests with a fresh reqId after give-up) on a 0.5s-and-up backoff, but a large
+        -- snapshot takes many seconds to drain through ChatThrottleLib. Emitting a full snapshot for every
+        -- RQ floods the wire faster than it drains, building a backlog that never clears -> the peer can
+        -- never hold a current sync (its ledger keeps getting rebuilt mid-stream). If a snapshot is
+        -- already outstanding to this peer, ignore the new request: our own Tick ack-retry redelivers the
+        -- in-flight one, and applying ANY snapshot clears the peer's pending request, so it converges.
+        for _, o in pairs(self.outstanding) do
+            if o.target == sender then return end
+        end
         self:_emitSnapshot("WHISPER", sender, reqId)
         self.outstanding[reqId] = { target = sender, reqId = reqId, attempts = 1, nextAttempt = now() + self:_backoff(1) }
     elseif t == "AK" then
@@ -252,8 +309,13 @@ function Channel:OnReceive(sender, message)
         if self.cb.isAuthority() then return end
         local epoch = f[2]
         local rev = tonumber(f[3]) or 0
-        local behind = self.lastRev == nil or rev > self.lastRev
-            or (epoch and epoch ~= "" and epoch ~= self.appliedEpoch)
+        -- Epoch monotonicity (mirrors the SD guard): a heartbeat from an OLDER session is a stale
+        -- authority -- ignore it, never resync backward. A newer epoch is a fresh session we have not
+        -- adopted (we ARE behind, pull it). Same epoch: behind only if its rev has moved past ours.
+        local incE, curE = tonumber(epoch), tonumber(self.appliedEpoch)
+        if incE and curE and incE < curE then return end
+        local epochChanged = epoch and epoch ~= "" and epoch ~= self.appliedEpoch
+        local behind = self.lastRev == nil or rev > self.lastRev or epochChanged
         if behind and not self.pendingRequest then
             self.cb.log("recv-hb-gap", { rev = rev, lastRev = self.lastRev, epoch = epoch })
             self:RequestSync()

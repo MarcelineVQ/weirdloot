@@ -503,6 +503,115 @@ test("an in-sync peer ignores the heartbeat", function()
     eq(countEv(rd, "recv-hb-gap"), 0, "in-sync peer logged no heartbeat gap")
 end)
 
+test("a stale, backlogged snapshot does not regress a peer that rode deltas past it", function()
+    reset()
+    local ml = makeHost("ML", true)
+    local rd = makeHost("Raider", false)
+    ml.roster = { ML = true, Raider = true }
+    setLine(ml, "L1", "v1")
+    ml.chan:Broadcast(true); deliver()                 -- baseline: rd mirrors {L1=v1}, appliedEpoch set
+
+    -- Peer asks for a resync; let the RQ reach the ML so it emits a TARGETED snapshot, but capture
+    -- that snapshot off the wire BEFORE it reaches the peer (models a slow ChatThrottleLib delivery).
+    rd.chan:RequestSync()
+    deliver()                                          -- RQ -> ML; ML enqueues a snapshot onto the wire
+    local held = {}
+    for _, m in ipairs(WIRE) do held[#held + 1] = m end
+    clearWire()
+    local staleRev = ml.chan.rev
+
+    -- Meanwhile the authority advances with deltas; the peer rides them forward past the snapshot's rev.
+    deltaChange(ml, "L1", "v2"); deliver()
+    deltaChange(ml, "L2", "v3"); deliver()
+    local aheadRev = rd.chan.lastRev
+    check(aheadRev > staleRev, "peer advanced past the stale snapshot's rev via deltas")
+
+    -- The backlogged snapshot finally lands. It must NOT drag the peer (or its ledger) backward.
+    for _, m in ipairs(held) do
+        if m.dist ~= "WHISPER" or m.target == "Raider" then rd.chan:OnReceive(m.sender, m.msg) end
+    end
+    eq(rd.chan.lastRev, aheadRev, "stale snapshot did not regress lastRev")
+    eq(view(rd), view(ml), "peer kept the newer ledger; stale snapshot ignored")
+    check(countEv(rd, "recv-snap-stale") >= 1, "the stale snapshot was logged as rejected")
+end)
+
+test("authority sends ONE snapshot per peer in flight, ignoring a flood of repeat requests", function()
+    reset()
+    local ml = makeHost("ML", true)
+    local rd = makeHost("Raider", false)
+    ml.roster = { ML = true, Raider = true }
+    setLine(ml, "L1", "rolling")
+
+    -- The peer floods requests (retries on the same reqId, plus re-requests with new reqIds after it
+    -- gives up) while a snapshot is still draining. The authority must emit exactly one snapshot and
+    -- ignore the rest, or it backlogs faster than the wire drains.
+    local SEP = string.char(30)
+    local function rq(reqId) return table.concat({ "RQ", "Raider", reqId }, SEP) end
+    ml.chan:OnReceive("Raider", rq("r1"))            -- first request -> one snapshot
+    ml.chan:OnReceive("Raider", rq("r1"))            -- retry, same reqId, snapshot still in flight
+    ml.chan:OnReceive("Raider", rq("r2"))            -- new reqId after a "give-up", still in flight
+    ml.chan:OnReceive("Raider", rq("r3"))
+
+    local snaps = 0
+    for _, m in ipairs(WIRE) do if firstField(m.msg) == "SB" then snaps = snaps + 1 end end
+    eq(snaps, 1, "only one snapshot emitted despite four requests")
+end)
+
+test("a peer ignores ledger state from a sender that is not its authority (no foreign loot)", function()
+    reset()
+    local ml = makeHost("ML", true)
+    local rd = makeHost("Raider", false)                 -- its authority is "ML"
+    setLine(ml, "L1", "real")
+    ml.chan:Broadcast(true); deliver()
+    eq(view(rd), view(ml), "peer synced from its real authority")
+
+    -- Another group's loot master (a different sender) pushes its own snapshot AND a delta. The peer
+    -- must ignore both: it is not bound to this authority, so the foreign ledger never leaks in.
+    local foreign = makeHost("OtherML", true)
+    setLine(foreign, "X9", "foreign")
+    foreign.chan:Broadcast(true)                          -- foreign full snapshot
+    deltaChange(foreign, "X9", "foreign2")                -- foreign delta
+    deliver()
+    eq(view(rd), view(ml), "peer kept its own ledger; foreign snapshot + delta ignored")
+    check(countEv(rd, "drop-foreign") >= 1, "foreign state was logged as dropped")
+
+    -- The real authority can still drive the peer (binding is by identity, not a blanket block).
+    deltaChange(ml, "L1", "real2"); deliver()
+    eq(view(rd), view(ml), "the real authority still updates the peer")
+end)
+
+test("a snapshot from an OLDER session (smaller epoch) is rejected; a newer one is adopted", function()
+    reset()
+    -- Same authority name, but its epoch (session id) is mutable, modelling a session restart.
+    local epoch = "2000"
+    local ml = makeHost("ML", true)
+    ml.chan.cb.epoch = function() return epoch end          -- override the fixed-epoch stub
+    local rd = makeHost("Raider", false)
+    setLine(ml, "NEW", "current")
+    ml.chan:Broadcast(true); deliver()
+    eq(rd.chan.appliedEpoch, "2000", "peer adopted the current session epoch")
+    eq(view(rd), view(ml), "peer mirrors the current session")
+
+    -- A stale OLD session (smaller epoch) snapshot lands late -- e.g. a restored long-lived session
+    -- that even sits at a higher rev. It must NOT drag the peer back to that dead session.
+    epoch = "1000"
+    ml.store = { ["OLD"] = { "OLD", "stale" } }
+    ml.chan.rev = 999                                        -- old session sits at a far higher rev
+    ml.chan:Broadcast(true); deliver()
+    eq(rd.chan.appliedEpoch, "2000", "peer stayed on the newer session; older epoch rejected")
+    check(rd.store["OLD"] == nil, "the stale session's lot did not leak in")
+    check(countEv(rd, "recv-snap-stale", function(d) return d.reason == "epoch" end) >= 1,
+        "older-epoch snapshot logged as rejected")
+
+    -- A genuinely NEWER session (larger epoch) is adopted, replacing the ledger.
+    epoch = "3000"
+    ml.chan.rev = 0
+    ml.store = { ["FRESH"] = { "FRESH", "new session" } }
+    ml.chan:Broadcast(true); deliver()
+    eq(rd.chan.appliedEpoch, "3000", "peer adopted the newer session")
+    check(rd.store["FRESH"] ~= nil and rd.store["NEW"] == nil, "ledger replaced by the new session")
+end)
+
 -- ===========================================================================
 print("")
 print(string.format("=== WeirdSync battery: %d passed, %d failed ===", pass, fail))

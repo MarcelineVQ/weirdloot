@@ -76,11 +76,12 @@ function addon:InitializeComm()
             applySnapshot  = function(lines, ep) self:SyncApplySnapshot(lines, ep) end,
             applyLine      = function(fields) self:SyncApplyLine(fields) end,
             log            = function(ev, data) self:LogCoreEvent(ev, data) end,
-            -- Front-loaded retry pinned for WeirdLoot (matches the lib defaults): a fast 0.5s first
-            -- resend recovers a simple dropped message; the gentle 1.5x growth (0.5,0.75,1.1,1.7,
-            -- 2.5,3.8,5.7,8.5s) still gives a zoning/loading player a ~25s horizon before give-up.
-            backoffBase    = 0.5,
-            backoffMul     = 1.5,
+            -- Retry schedule: flatter than a steep exponential so a resync after a gap/reload recovers
+            -- on a steady cadence instead of ballooning to ~8s gaps. A 1.0s first resend lets a normal
+            -- message land before we retry (a 0.5s first retry fires before delivery and just amplifies),
+            -- and the gentle 1.3x growth (1.0,1.3,1.7,2.2,2.9,3.7,4.8,6.3s) keeps a ~24s give-up horizon.
+            backoffBase    = 1.0,
+            backoffMul     = 1.3,
             maxAttempts    = 8,
             -- Authority re-announces its rev every 30s so a raider that missed the last delta of a
             -- now-quiet session heals itself (no manual resync button needed).
