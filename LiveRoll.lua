@@ -204,21 +204,25 @@ end
 function addon:SyncRollPopups()
     if self:IsAuthorizedLootMaster() then return end
     local core = self.lootCore
+    -- RESTORE ONLY. A raider's roll popup is opened by the DROP message and closed by the CANCEL or WIN
+    -- message -- it is message-driven, never polled from ledger state. The ledger mirror legitimately
+    -- passes through transient states during sync convergence: a freshly synced lot reads NEW/PENDING
+    -- for an instant before its ROLLING delta lands, and a snapshot built pre-roll but delivered late
+    -- (a reloading raider's resync answered from an early rev) shows the lots as NEW until the trailing
+    -- deltas catch up. Polling those transients to close live popups made them vanish mid-roll and then
+    -- re-open at a reset full-duration timer. So we no longer close here at all -- CANCEL (OnCancelMessage)
+    -- and WIN (OnWinMessage) own the close. The restore side stays: a raider that missed the DROP (relog)
+    -- gets a popup for any lot the ledger says is ROLLING and that has no open popup.
+    -- Restore only a lot we have NO record of: a reloading raider lost self.live.rolls and must rebuild
+    -- popups for whatever the ledger says is ROLLING. We must NOT restore a lot we already know about --
+    -- in particular one whose WIN we already processed (roll.resolved = true). The ledger mirror can lag
+    -- a resolve (the RESOLVED delta trails the WIN message, or a duplicate/coalesced lot stays ROLLING in
+    -- the mirror a beat longer), so a "has a record and it is resolved" lot read as restorable would
+    -- re-open a fresh roll popup AFTER the item was already awarded. A record that exists and is NOT
+    -- resolved already has its popup open, so it is skipped here too.
     for _, lot in ipairs(core:List()) do
-        if lot.state == core.STATE.ROLLING and not self:HasOpenRollForLot(lot.id) then
+        if lot.state == core.STATE.ROLLING and not (self.live.rolls and self.live.rolls[lot.id]) then
             self:RestoreRollPopup(lot)
-        end
-    end
-    for i = #self.live.active, 1, -1 do
-        local f = self.live.active[i]
-        -- Only a CANCEL (lot back to pending/idle) or a vanished lot closes a raider's roll popup
-        -- via sync. A RESOLUTION must NOT close it here: the WIN converts it to a result popup whose
-        -- lifetime is governed by the auto-close option. Closing on RESOLVED races the WIN (the
-        -- resolved-lot delta and the WIN arrive together) and makes the popup vanish instantly.
-        local st = f.rollId and core:State(f.rollId)
-        if f.mode == "interest" and f.rollId and st ~= core.STATE.ROLLING and st ~= core.STATE.RESOLVED then
-            if self.live.rolls then self.live.rolls[f.rollId] = nil end
-            self:ClosePendingFrame(f)
         end
     end
 end
