@@ -1878,7 +1878,7 @@ function addon:BuildOptionsTab()
     autoCloseSeconds:SetText(tostring(opt.resultPopupAutoCloseSeconds or 15))
     autoCloseSeconds:SetScript("OnEditFocusLost", function(selfBox)
         local v = tonumber(selfBox:GetText())
-        if v and v > 0 then
+        if v and v >= 0 then           -- 0 is valid: fade out immediately, no hold
             getOptions(addon).resultPopupAutoCloseSeconds = v
         else
             selfBox:SetText(tostring(getOptions(addon).resultPopupAutoCloseSeconds or 15))
@@ -1913,9 +1913,18 @@ function addon:BuildOptionsTab()
     lmDivider:SetPoint("TOPLEFT", lmHeader, "BOTTOMLEFT", 0, -4)
     lmDivider:SetPoint("RIGHT", panel, "RIGHT", -40, 0)
 
+    -- Keep finished-loot winner popups open on the ML's screen so they can study the winners,
+    -- ignoring the ML's own auto-close. ML-only: raiders always follow their personal setting.
+    local keepResultCB = createOptionsCheckbox(panel, "Never auto-close your loot popups")
+    keepResultCB:SetPoint("TOPLEFT", lmDivider, "BOTTOMLEFT", 0, -14)
+    keepResultCB:SetChecked(opt.forceKeepResultPopup ~= false)   -- default ON
+    keepResultCB:SetScript("OnClick", function(selfCB)
+        getOptions(addon).forceKeepResultPopup = selfCB:GetChecked() and true or false
+    end)
+
     -- Roll duration (loot master)
     local rollDurLabel = createLabel(panel, "Roll duration (seconds):",
-        "TOPLEFT", lmDivider, "BOTTOMLEFT", 0, -14)
+        "TOPLEFT", keepResultCB, "BOTTOMLEFT", 0, -14)
     local rollDurBox = createNumberEditBox(panel, 50)
     rollDurBox:SetPoint("LEFT", rollDurLabel, "RIGHT", 12, 0)
     rollDurBox:SetText(tostring(opt.rollDuration or 20))

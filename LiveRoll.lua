@@ -552,6 +552,10 @@ local function applyInterestButtonAvailability(self, f, roll)
                 GameTooltip:Show()
             end)
             btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        elseif key == "pass" and not roll.owner then
+            -- The two-click dismiss is non-obvious, so the Pass hint shows even when the explanation
+            -- tooltips are off. Only the raider's Pass closes the popup; the ML's never does.
+            setButtonTooltip(btn, "Pass on this item.\nClick twice to dismiss the popup.")
         elseif getOptions().explanationTooltipsEnabled then
             setButtonTooltip(btn, CHOICE_TOOLTIPS[key])
         else
@@ -674,11 +678,12 @@ end
 -- tab row. One path for both directions -- the popup buttons and a loot-tab pick (via
 -- SetPlayerResponse) both route here -- so a choice made on either surface lights up the matching
 -- button on the other, without waiting on the ledger (a raider's own pick is whispered to the ML
--- and is not in the local ledger until the snapshot returns). nil/pass clears the highlight.
+-- and is not in the local ledger until the snapshot returns). Pass is a real choice like any
+-- bracket: it highlights the Pass button (it just carries no roll). nil clears the highlight.
 function addon:ApplyLocalChoice(lotId, tier)
     local roll = self.live and self.live.rolls and self.live.rolls[lotId]
     if roll and not roll.resolved then
-        roll.choice = (tier and tier ~= "pass") and tier or nil
+        roll.choice = tier
         if roll.popup then highlightInterestButton(roll.popup, roll.choice) end
     end
     if self.MarkLocalLootChoice then self:MarkLocalLootChoice(lotId, tier) end
@@ -870,14 +875,36 @@ local function compactPopups(self)
     layoutPopups(self)
 end
 
+-- How long the result popup takes to fade out after its auto-close timer expires.
+local RESULT_FADE_SECONDS = 0.4
+
 local function closePopup(self, f)
     if not f then return end
     f:SetScript("OnUpdate", nil)        -- stop the countdown on a pooled frame
     resetInterestButtons(f)             -- clear any locked roll-choice highlight
+    f:SetAlpha(1)                       -- clear any auto-close fade so a reused frame starts opaque
     f:Hide()
     removeActive(self, f)
     self.live.pool[#self.live.pool + 1] = f
     layoutPopups(self)
+end
+
+-- Fade the result popup out over RESULT_FADE_SECONDS, then close it and free its slot. Shared by
+-- the auto-close timer expiry (after the countdown) and the immediate timeout == 0 close, so both
+-- ease away the same way rather than snapping shut.
+local function beginResultFadeOut(self, f)
+    f.fadeElapsed = 0
+    f:SetScript("OnUpdate", function(fadeFrame, elapsed)
+        fadeFrame.fadeElapsed = fadeFrame.fadeElapsed + (elapsed or 0)
+        local a = 1 - fadeFrame.fadeElapsed / RESULT_FADE_SECONDS
+        if a <= 0 then
+            fadeFrame:SetScript("OnUpdate", nil)
+            closePopup(self, fadeFrame)     -- restores alpha to 1 on the pooled frame
+            compactPopups(self)
+        else
+            fadeFrame:SetAlpha(a)
+        end
+    end)
 end
 
 -- Late-bound method wrapper so the event handlers defined earlier (SyncPendingPopups) can
@@ -1030,7 +1057,7 @@ function addon:ShowInterestPopup(roll, slot)
     -- roll starts, so the popup opens with that bracket already highlighted (RefreshInterestPopup
     -- re-asserts it below from roll.choice).
     local mine = self:GetPlayerResponse(roll.id, util:GetPlayerName("player"))
-    roll.choice = (mine and mine ~= "pass") and mine or nil
+    roll.choice = mine   -- includes "pass": a prior pass opens with the Pass button highlighted
     f.icon:SetTexture(roll.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
     f.itemLink = roll.link
     f.name:SetText(formatRollItemLabel(roll.link, roll.name, roll.quantity))
@@ -1142,7 +1169,11 @@ function addon:ChooseInterest(roll, tier)
     end
     self:SendInterest(roll.id, tier)
 
-    if tier == "pass" and not roll.owner then
+    -- Pass is a roll choice like any bracket: the first click selects and highlights it. For a raider
+    -- a SECOND click on an already-selected Pass dismisses the loot popup. The two-click guard stops a
+    -- misclick from closing the popup outright. The ML's popup never closes on Pass: for the owner it
+    -- is purely a roll-type choice, so a repeat click just re-asserts the selection (no-op).
+    if tier == "pass" and not roll.owner and roll.choice == "pass" then
         roll.choice = nil
         self:CloseInterestPopup(roll)
         compactPopups(self)
@@ -1374,7 +1405,10 @@ function addon:ShowResultPopup(roll, winners, sections, slot)
     -- disabled, the popup stays until the player clicks OK. The same bottom-bar countdown used by
     -- the roll popup visualizes the remaining time so the player sees how long they have to look.
     local opt = getOptions()
-    if opt.resultPopupAutoCloseEnabled then
+    -- The ML keeps finished-loot popups open to examine the winners closely, overriding their own
+    -- auto-close. This is the loot master's own UI only; raiders always follow their personal setting.
+    local mlKeepOpen = opt.forceKeepResultPopup and self:IsAuthorizedLootMaster()
+    if opt.resultPopupAutoCloseEnabled and not mlKeepOpen then
         local timeout = tonumber(opt.resultPopupAutoCloseSeconds) or 0
         if timeout > 0 then
             f.timer:Show()
@@ -1389,19 +1423,15 @@ function addon:ShowResultPopup(roll, winners, sections, slot)
                 selfFrame.timer:SetValue(frac)
                 selfFrame.timer:SetStatusBarColor(1 - frac, frac, 0.1)   -- green -> red as it drains
                 if remaining <= 0 then
-                    selfFrame:SetScript("OnUpdate", nil)
+                    -- Timer is up: hide the bar and fade the popup out, then close. The countdown
+                    -- runs at full alpha so the bar stays readable until the very end.
                     selfFrame.timer:Hide()
-                    closePopup(self, selfFrame)
-                    compactPopups(self)
+                    beginResultFadeOut(self, selfFrame)
                 end
             end)
         else
-            -- timeout == 0: close on the next frame, no visible bar.
-            f:SetScript("OnUpdate", function(selfFrame)
-                selfFrame:SetScript("OnUpdate", nil)
-                closePopup(self, selfFrame)
-                compactPopups(self)
-            end)
+            -- timeout == 0: no hold and no bar, but still fade out instead of snapping shut.
+            beginResultFadeOut(self, f)
         end
     end
 
