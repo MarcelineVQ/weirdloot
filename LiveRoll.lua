@@ -1296,7 +1296,35 @@ function addon:ShowResultPopup(roll, winners, sections, slot)
         local winnerLabel = #winnerParts > 1 and "Winners" or "Winner"
         line = string.format("%s: %s", winnerLabel, table.concat(winnerParts, "; "))
     end
+
+    -- TM consolation: if the local player rolled TM (transmog) on this item and didn't win, add a
+    -- hint to contact the winner(s). The TMer typically wants the appearance once the winner is
+    -- done with the item; surfacing the name here saves them digging into the roll breakdown.
+    if #winnerList > 0 and not winnerKeys[myKey] then
+        local rolledTm = false
+        for _, s in ipairs(sections or {}) do
+            if s.label == "TM" then
+                for _, m in ipairs(s.members) do
+                    if util:NormalizeKey(m.name) == myKey then
+                        rolledTm = true
+                        break
+                    end
+                end
+                break
+            end
+        end
+        if rolledTm then
+            local names = {}
+            for _, w in ipairs(winnerList) do
+                local className = getPlayerClassName(self, w.key)
+                names[#names + 1] = util:ColorPlayerName(w.name, className)
+            end
+            line = line .. "\nContact " .. table.concat(names, " or ") .. " to trade for your transmog"
+        end
+    end
+
     f.sub:SetText(line)
+    setPopupHeight(f, getCompactResultPopupHeight(f))   -- recompute now that sub may be multi-line
 
     f.bisBtn:Hide(); f.msBtn:Hide(); f.muBtn:Hide(); f.osBtn:Hide(); f.tmBtn:Hide(); f.passBtn:Hide(); f.rollBtn:Hide(); f.cancelBtn:Hide()
     f.count:Hide()
