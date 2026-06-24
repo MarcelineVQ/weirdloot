@@ -1,21 +1,27 @@
 -- WeirdSync-1.0
 --
--- A small reliable state-synchronization library for 3.3.5a addons, built on AceComm-3.0.
+-- A small reliable state-synchronization library for 3.3.5a addons.
 -- One authority (e.g. the loot master) replicates an evolving table of state to many peers
 -- (the raid) and guarantees a peer that missed traffic while zoning/dead/disconnected
 -- converges back to the authority's state without a human noticing.
 --
 -- The library owns DELIVERY: a monotonic revision, snapshot/delta framing, gap detection +
 -- resync, reliable request/response, targeted-send acknowledgement, retry/backoff, give-up.
--- The host owns ALL payload semantics: a snapshot or delta "line" is an opaque array of
--- strings the library relays and stamps but never interprets. This keeps the lib data-agnostic
+-- The host owns ALL payload semantics: a snapshot or delta "line" is an opaque VALUE (array or
+-- table) the library relays and stamps but never interprets. This keeps the lib data-agnostic
 -- and reusable across addons.
+--
+-- Transport-agnostic: the host provides cb.send(value, dist, target, prio) and feeds inbound
+-- decoded values to channel:OnReceive(sender, value). WeirdLoot runs this over WeirdComm-1.0 (one
+-- shared channel + pacer for ALL its traffic, so the server's per-player message mute is respected
+-- across sync AND live-roll), where a whole snapshot ships as ONE message (a SNAP value holding
+-- every line) instead of SB + N*SE + SD. But WeirdSync never touches bytes or the transport itself.
 --
 -- Delivery semantics: at-least-once with eventual convergence. Not exactly-once, not ordered.
 -- Duplicate or reordered messages are harmless because the host's apply is idempotent.
 --
 -- Contract (the full design lives in these comments, not a separate doc):
---   * Wire tags (field 1):  SB/SE/SD = snapshot begin/entry/done,  D = delta line,
+--   * Message tags (value[1]):  SNAP = full snapshot (carries every line),  D = delta line,
 --     RQ = peer's sync request,  AK = peer's ack of a targeted snapshot. See OnReceive/Tick.
 --   * Revision: every broadcast carries a rev; a peer that sees a gap (rev > lastRev+1) requests
 --     a full resync rather than applying out of order. Targeted (whispered) snapshots carry the
@@ -34,25 +40,6 @@ local WeirdSync = LibStub:NewLibrary(MAJOR, MINOR)
 if not WeirdSync then return end -- already loaded a newer or equal version
 
 WeirdSync.channels = WeirdSync.channels or {}
-
--- ---------------------------------------------------------------------------
--- wire codec: fields joined by a record-separator byte (0x1e) that never appears in
--- normal item/player text, so no escaping is needed. Field 1 is the message type tag.
--- ---------------------------------------------------------------------------
-local SEP = string.char(30)
-
-local function encode(fields)
-    return table.concat(fields, SEP)
-end
-
-local function decode(msg)
-    local out = {}
-    -- append a trailing SEP so the final field (even if empty) is captured.
-    for part in (msg .. SEP):gmatch("(.-)" .. SEP) do
-        out[#out + 1] = part
-    end
-    return out
-end
 
 -- ---------------------------------------------------------------------------
 -- channel
@@ -78,18 +65,19 @@ function Channel:_backoff(attempt)
     return self.cfg.backoffBase * (self.cfg.backoffMul ^ (attempt - 1))
 end
 
-function Channel:_send(fields, dist, target, prio)
-    local msg = encode(fields)
-    if self.SendCommMessage then
-        self:SendCommMessage(self.prefix, msg, dist, target, prio or "BULK")
-    end
-    self.cb.log("send", { cmd = fields[1], bytes = #msg, prio = prio or "BULK", dist = dist, target = target })
+-- Hand one logical message (a Lua value; value[1] is the type tag) to the host's transport. The
+-- transport (WeirdComm in WeirdLoot) serializes/compresses/chunks/paces; we never touch bytes.
+function Channel:_send(value, dist, target, prio)
+    self.cb.send(value, dist, target, prio or "BULK")
+    self.cb.log("send", { cmd = value[1], prio = prio or "BULK", dist = dist, target = target })
 end
 
--- Emit a full snapshot as SB -> SE* -> SD. A RAID broadcast bumps the shared revision so every
--- peer rebaselines to it. A targeted (WHISPER) snapshot carries the authority's CURRENT
--- revision and must NOT bump it: bumping would advance the shared rev without the rest of the
--- raid seeing the SB, making everyone else's next delta look like a gap (a resync storm).
+-- Emit a full snapshot as ONE message. A RAID broadcast bumps the shared revision so every peer
+-- rebaselines to it. A targeted (WHISPER) snapshot carries the authority's CURRENT revision and
+-- must NOT bump it: bumping would advance the shared rev without the rest of the raid seeing the
+-- snapshot, making everyone else's next delta look like a gap (a resync storm). Every state line
+-- the host emits is collected into one SNAP value, so the whole snapshot is a single WeirdComm
+-- message regardless of roster/ledger size.
 function Channel:_emitSnapshot(dist, target, reqId)
     local rev
     if target then
@@ -98,26 +86,22 @@ function Channel:_emitSnapshot(dist, target, reqId)
         self.rev = self.rev + 1
         rev = self.rev
     end
-    self:_send({ "SB", self.cb.epoch(), tostring(rev), reqId or "" }, dist, target)
+    local lines = {}
     self.cb.buildSnapshot(function(lineFields)
-        local f = { "SE" }
-        for _, v in ipairs(lineFields) do f[#f + 1] = v end
-        self:_send(f, dist, target)
+        lines[#lines + 1] = lineFields
     end)
-    self:_send({ "SD", self.cb.epoch() }, dist, target)
+    self:_send({ "SNAP", self.cb.epoch(), tostring(rev), reqId or "", lines }, dist, target)
     self._pending = {} -- a snapshot supersedes any queued deltas
 end
 
 function Channel:_sendDeltas(lines)
     for _, line in ipairs(lines) do
         self.rev = self.rev + 1
-        local f = { "D", tostring(self.rev) }
-        for _, v in ipairs(line) do f[#f + 1] = v end
-        self:_send(f, "RAID")
+        self:_send({ "D", tostring(self.rev), line }, "RAID")
     end
 end
 
--- Authority: queue changed lines (each an opaque array of strings) for the next Broadcast.
+-- Authority: queue changed lines (each an opaque value) for the next Broadcast.
 function Channel:NotifyChanged(lines)
     self._pending = self._pending or {}
     for _, l in ipairs(lines or {}) do
@@ -180,24 +164,25 @@ function Channel:NotifyZoneIn()
     self:RequestSync()
 end
 
--- Routed incoming message (the lib registers its prefix with AceComm; in tests the host calls
--- this directly with the reassembled logical message).
-function Channel:OnReceive(sender, message)
+-- Routed incoming message. WeirdComm reassembles a complete logical message and hands us the
+-- decoded VALUE (value[1] is the type tag). In tests the host calls this directly.
+function Channel:OnReceive(sender, value)
     -- Ignore our OWN echoed broadcasts (some servers deliver a sender its own RAID messages).
     -- Only self is dropped: a different sender (a secondary authority, leadership pushing updates)
     -- is still processed, so peer->authority flows remain open.
     if normName(sender) == self.meKey then return end
+    if type(value) ~= "table" then return end
 
-    local f = decode(message)
+    local f = value
     local t = f[1]
 
-    -- Authority binding: the snapshot frames (SB/SE/SD), deltas (D) and heartbeat (H) carry ledger
-    -- state, and we trust them ONLY from the current authority -- the peer's own loot master. A state
-    -- message from anyone else (a stale ML, or another group's loot master whose targeted WHISPER
-    -- snapshot crosses group boundaries) would be applied and leak a foreign ledger into ours: the
-    -- raider then mirrors loot from a group/session it is not in. Drop it. The request/ack handshake
-    -- (RQ/AK) is left open -- each is already gated by isAuthority -- so peer<->authority flows work.
-    if t == "SB" or t == "SE" or t == "SD" or t == "D" or t == "H" then
+    -- Authority binding: state messages (SNAP, delta D, heartbeat H) carry ledger state, and we
+    -- trust them ONLY from the current authority -- the peer's own loot master. A state message from
+    -- anyone else (a stale ML, or another group's loot master whose targeted snapshot crosses group
+    -- boundaries) would be applied and leak a foreign ledger into ours: the raider then mirrors loot
+    -- from a group/session it is not in. Drop it. The request/ack handshake (RQ/AK) is left open --
+    -- each is already gated by isAuthority -- so peer<->authority flows work.
+    if t == "SNAP" or t == "D" or t == "H" then
         local auth = self.cb.authorityName()
         if not auth or auth == "" or normName(sender) ~= normName(auth) then
             self.cb.log("drop-foreign", { from = sender, t = t })
@@ -205,25 +190,16 @@ function Channel:OnReceive(sender, message)
         end
     end
 
-    if t == "SB" then
-        self._incoming = {
+    if t == "SNAP" then
+        local inc = {
             epoch = f[2],
             rev = tonumber(f[3]) or 0,
             reqId = (f[4] ~= "" and f[4]) or nil,
-            lines = {},
+            lines = f[5] or {},
         }
-    elseif t == "SE" then
-        local inc = self._incoming
-        if not inc then return end -- stray SE without an SB
-        local line = {}
-        for i = 2, #f do line[#line + 1] = f[i] end
-        inc.lines[#inc.lines + 1] = line
-    elseif t == "SD" then
-        local inc = self._incoming
-        if not inc then return end
-        -- Epoch monotonicity: never adopt an OLDER session. Epochs are time()-stamped session ids, so a
-        -- smaller epoch is a stale session -- an authority that restored a long-lived old session, or a
-        -- leftover/backlogged broadcast from one. Adopting it sets appliedEpoch backward, which makes
+        -- Epoch monotonicity: never adopt an OLDER session. Epochs are time()-stamped session ids, so
+        -- a smaller epoch is a stale session -- an authority that restored a long-lived old session, or
+        -- a leftover/backlogged broadcast from one. Adopting it sets appliedEpoch backward, which makes
         -- every heartbeat from the CURRENT session read as an epoch mismatch (endless resync), and also
         -- defeats the same-epoch rev guard below, because an old long-lived session can sit at a far
         -- HIGHER rev than a fresh one (so rev comparison across epochs is meaningless). Reject a strictly
@@ -231,34 +207,28 @@ function Channel:OnReceive(sender, message)
         local incE, curE = tonumber(inc.epoch), tonumber(self.appliedEpoch)
         if incE and curE and incE < curE then
             self.pendingRequest = nil
-            self._incoming = nil
             self.cb.log("recv-snap-stale", { reason = "epoch", epoch = inc.epoch, curEpoch = self.appliedEpoch })
             if inc.reqId then self:_send({ "AK", inc.reqId }, "WHISPER", sender, "ALERT") end
             return
         end
         -- Never let a stale, backlogged snapshot move us BACKWARD. A snapshot is built at the authority's
-        -- rev when it answers a request, but it ships as one SB + N SE + SD through ChatThrottleLib, so a
-        -- large one is delivered seconds late -- by which time deltas may have already carried us past it.
-        -- Applying it then would regress lastRev AND replace the ledger with older state, re-tripping gap
-        -- detection on the next delta: a self-sustaining resync storm. Drop a same-epoch snapshot whose
-        -- rev is older than what we hold; still clear our request and ack so the authority stops retrying
-        -- this delivery. A NEW epoch (session rebaseline) or a first-ever sync (lastRev == nil) always
-        -- applies -- only a same-epoch backslide is rejected.
+        -- rev when it answers a request; if it is delivered late (chunked + paced), deltas may have
+        -- already carried us past it. Applying it then would regress lastRev AND replace the ledger with
+        -- older state, re-tripping gap detection on the next delta: a self-sustaining resync storm. Drop a
+        -- same-epoch snapshot whose rev is older than what we hold; still clear our request and ack so the
+        -- authority stops retrying. A NEW epoch (session rebaseline) or a first-ever sync (lastRev == nil)
+        -- always applies -- only a same-epoch backslide is rejected.
         local sameEpoch = (self.appliedEpoch ~= nil and inc.epoch == self.appliedEpoch)
         if sameEpoch and self.lastRev ~= nil and inc.rev < self.lastRev then
             self.pendingRequest = nil
-            self._incoming = nil
             self.cb.log("recv-snap-stale", { rev = inc.rev, lastRev = self.lastRev })
-            if inc.reqId then
-                self:_send({ "AK", inc.reqId }, "WHISPER", sender, "ALERT")
-            end
+            if inc.reqId then self:_send({ "AK", inc.reqId }, "WHISPER", sender, "ALERT") end
             return
         end
         self.cb.applySnapshot(inc.lines, inc.epoch)
         self.lastRev = inc.rev      -- a snapshot re-baselines the revision
         self.appliedEpoch = inc.epoch
         self.pendingRequest = nil   -- our outstanding request (if any) is satisfied
-        self._incoming = nil
         self.cb.log("recv-snap", { rev = inc.rev, lines = #inc.lines })
         if inc.reqId then
             -- confirm a TARGETED snapshot was applied so the authority can stop retrying.
@@ -274,21 +244,16 @@ function Channel:OnReceive(sender, message)
             return
         end
         if rev <= last then return end -- stale / duplicate
-        local line = {}
-        for i = 3, #f do line[#line + 1] = f[i] end
-        self.cb.applyLine(line)
+        self.cb.applyLine(f[3])
         self.lastRev = rev
         self.cb.log("recv-lot", { rev = rev })
     elseif t == "RQ" then
         if not self.cb.isAuthority() then return end
         local reqId = f[3]
         -- Coalesce per target: at most ONE snapshot in flight to a given peer. A peer retries the same
-        -- reqId (and re-requests with a fresh reqId after give-up) on a 0.5s-and-up backoff, but a large
-        -- snapshot takes many seconds to drain through ChatThrottleLib. Emitting a full snapshot for every
-        -- RQ floods the wire faster than it drains, building a backlog that never clears -> the peer can
-        -- never hold a current sync (its ledger keeps getting rebuilt mid-stream). If a snapshot is
-        -- already outstanding to this peer, ignore the new request: our own Tick ack-retry redelivers the
-        -- in-flight one, and applying ANY snapshot clears the peer's pending request, so it converges.
+        -- reqId (and re-requests with a fresh reqId after give-up) on backoff. Emitting a full snapshot
+        -- for every RQ while one is already outstanding to this peer just backlogs the wire; our own Tick
+        -- ack-retry redelivers the in-flight one, and applying ANY snapshot clears the peer's request.
         for _, o in pairs(self.outstanding) do
             if o.target == sender then return end
         end
@@ -309,7 +274,7 @@ function Channel:OnReceive(sender, message)
         if self.cb.isAuthority() then return end
         local epoch = f[2]
         local rev = tonumber(f[3]) or 0
-        -- Epoch monotonicity (mirrors the SD guard): a heartbeat from an OLDER session is a stale
+        -- Epoch monotonicity (mirrors the SNAP guard): a heartbeat from an OLDER session is a stale
         -- authority -- ignore it, never resync backward. A newer epoch is a fresh session we have not
         -- adopted (we ARE behind, pull it). Same epoch: behind only if its rev has moved past ours.
         local incE, curE = tonumber(epoch), tonumber(self.appliedEpoch)
@@ -381,12 +346,14 @@ end
 --   authorityName()          -> string whom a peer whispers for resync
 --   rosterContains(name)     -> bool   roster-aware give-up (defaults true)
 --   epoch()                  -> string rebaseline key (e.g. session id; defaults "")
---   buildSnapshot(emit)      authority emits every state line: emit(fields)
---   applySnapshot(lines, ep) peer replaces local state from a staged full snapshot
---   applyLine(fields)        peer upserts one delta line
+--   send(value,dist,target,prio)  REQUIRED transport: deliver one logical value (host owns bytes)
+--   buildSnapshot(emit)      authority emits every state line: emit(value)
+--   applySnapshot(lines, ep) peer replaces local state from a full snapshot's line list
+--   applyLine(value)         peer upserts one delta line
 --   log(ev, data)            trace sink (defaults to no-op)
 --   selfName                 OPTIONAL explicit player name (else UnitName("player"))
 --   deltaMax/backoffBase/backoffMul/maxAttempts/heartbeat  OPTIONAL tuning
+-- The host feeds inbound decoded values to channel:OnReceive(sender, value).
 function WeirdSync:NewChannel(prefix, cb)
     assert(type(prefix) == "string" and prefix ~= "", "WeirdSync:NewChannel requires a prefix")
     cb = cb or {}
@@ -394,6 +361,7 @@ function WeirdSync:NewChannel(prefix, cb)
     local ch = setmetatable({}, Channel)
     ch.prefix = prefix
     ch.cb = {
+        send = cb.send or noop,   -- host transport; without it the channel is inert (logs only)
         isAuthority = cb.isAuthority or function() return false end,
         authorityName = cb.authorityName or function() return "" end,
         rosterContains = cb.rosterContains or function() return true end,
@@ -422,14 +390,7 @@ function WeirdSync:NewChannel(prefix, cb)
     -- across a /reload, so each channel lifetime gets a distinct value). Injectable for tests.
     ch.nonce = cb.nonce or tostring(math.floor(now()))
 
-    -- transport: register our prefix with AceComm and route inbound to OnReceive.
-    local Comm = LibStub("AceComm-3.0", true)
-    if Comm and Comm.Embed then
-        Comm:Embed(ch)
-        if ch.RegisterComm then
-            ch:RegisterComm(prefix, function(_, message, _, sender) ch:OnReceive(sender, message) end)
-        end
-    end
+    -- Transport is the host's (cb.send + feeding OnReceive); WeirdSync does not own a channel.
 
     -- self-driving retry tick (no AceTimer on 3.3.5a; drive off an OnUpdate frame).
     if CreateFrame then

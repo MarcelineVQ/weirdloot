@@ -34,8 +34,8 @@ local CHANNELS = {}            -- me -> channel (for the router)
 
 local function clearWire() WIRE = {} end
 
--- first field (message type tag) of a wire message
-local function firstField(msg) return msg:match("^(.-)" .. string.char(30)) or msg end
+-- message type tag of a wire message (value[1])
+local function firstField(m) return m.value and m.value[1] end
 
 -- Deliver everything currently on the wire to every channel it is addressed to, in order.
 -- A WHISPER reaches only its target; anything else reaches all non-senders. Returns nothing;
@@ -46,9 +46,9 @@ local function deliver()
         for me, ch in pairs(CHANNELS) do
             if m.sender ~= me then
                 if m.dist == "WHISPER" then
-                    if m.target == me then ch:OnReceive(m.sender, m.msg) end
+                    if m.target == me then ch:OnReceive(m.sender, m.value) end
                 else
-                    ch:OnReceive(m.sender, m.msg)
+                    ch:OnReceive(m.sender, m.value)
                 end
             end
         end
@@ -69,15 +69,27 @@ end
 -- load the library once into a mocked env
 -- ---------------------------------------------------------------------------
 local libs = {}
-local aceComm = {
-    Embed = function(_, target)
-        target.SendCommMessage = function(self, prefix, msg, dist, tgt, prio)
-            WIRE[#WIRE + 1] = { prefix = prefix, msg = msg, dist = dist, target = tgt, sender = self.me, prio = prio }
-        end
-        target.RegisterComm = function() end
+local function deepcopy(v)
+    if type(v) ~= "table" then return v end
+    local out = {}
+    for k, val in pairs(v) do out[k] = deepcopy(val) end
+    return out
+end
+-- Fake WeirdComm: a pass-through transport. Send records the logical VALUE on the wire (deep-copied
+-- to mimic the real lib's serialize-on-send, so later host mutation can't alias the captured msg).
+-- The real WeirdComm's codec/chunk/pace/reassembly is covered by tests/weirdcomm.lua, and the
+-- real-lib-over-real-lib seam by tests/integration.lua; here we isolate WeirdSync's reliability logic.
+local weirdComm = {
+    NewChannel = function(_, prefix, opts)
+        return {
+            Send = function(_, value, dist, target, prio)
+                WIRE[#WIRE + 1] = { prefix = prefix, value = deepcopy(value), dist = dist, target = target, sender = opts.selfName, prio = prio }
+            end,
+            Tick = function() end,
+        }
     end,
 }
-libs["AceComm-3.0"] = aceComm
+libs["WeirdComm-1.0"] = weirdComm
 local LibStub = setmetatable({
     NewLibrary = function(_, name) libs[name] = libs[name] or {}; return libs[name] end,
     GetLibrary = function(_, name) return libs[name] end,
@@ -112,6 +124,10 @@ local function makeHost(name, isML, opts)
     }
     local cb = {
         selfName = name,
+        -- transport seam: record the logical VALUE on the wire (deep-copied to mimic serialize-on-send)
+        send = function(value, dist, target, prio)
+            WIRE[#WIRE + 1] = { value = deepcopy(value), dist = dist, target = target, sender = name, prio = prio }
+        end,
         isAuthority = function() return isML end,
         authorityName = function() return host.authority or "" end,
         rosterContains = function(n) return host.roster[n] == true end,
@@ -202,8 +218,8 @@ test("a single change sends a delta (D), not a snapshot, and applies", function(
     deltaChange(ml, "L1", "rolling")
     local snaps, deltas = 0, 0
     for _, m in ipairs(WIRE) do
-        local t = firstField(m.msg)
-        if t == "SB" then snaps = snaps + 1 end
+        local t = firstField(m)
+        if t == "SNAP" then snaps = snaps + 1 end
         if t == "D" then deltas = deltas + 1 end
     end
     eq(snaps, 0, "no snapshot for a single change")
@@ -222,7 +238,7 @@ test("more than deltaMax changes falls back to a full snapshot", function()
     ml.chan:NotifyChanged({ ml.store.L1, ml.store.L2, ml.store.L3, ml.store.L4, ml.store.L5 })
     ml.chan:Broadcast(false)
     local sawSB = false
-    for _, m in ipairs(WIRE) do if m.msg:sub(1, 2) == "SB" then sawSB = true end end
+    for _, m in ipairs(WIRE) do if firstField(m) == "SNAP" then sawSB = true end end
     check(sawSB, "fell back to a snapshot for a large change set")
     deliver()
     eq(view(rd), view(ml), "peer converged via the fallback snapshot")
@@ -420,12 +436,12 @@ test("a channel ignores its OWN echoed broadcast (but not another sender's)", fu
     local own = {}
     for _, m in ipairs(WIRE) do own[#own + 1] = m end
     -- feed the ML its own messages back (as a self-echoing server would)
-    for _, m in ipairs(own) do ml.chan:OnReceive("ML", m.msg) end
+    for _, m in ipairs(own) do ml.chan:OnReceive("ML", m.value) end
     eq(countEv(ml, "recv-snap"), 0, "ML did not apply its own echoed snapshot")
     eq(ml.chan.lastRev, nil, "ML's receive baseline untouched by self-echo")
     -- a DIFFERENT sender's message is still processed
     local rd = makeHost("Raider", false)
-    for _, m in ipairs(own) do rd.chan:OnReceive("ML", m.msg) end
+    for _, m in ipairs(own) do rd.chan:OnReceive("ML", m.value) end
     eq(countEv(rd, "recv-snap"), 1, "a peer still applies the ML's snapshot")
 end)
 
@@ -440,7 +456,7 @@ test("duplicate / stale delta is ignored (idempotent, no double-apply)", functio
     deliver()                                -- apply once
     local applied = countEv(rd, "recv-lot")
     -- replay the same delta bytes again
-    for _, m in ipairs(snapshot) do rd.chan:OnReceive(m.sender, m.msg) end
+    for _, m in ipairs(snapshot) do rd.chan:OnReceive(m.sender, m.value) end
     eq(countEv(rd, "recv-lot"), applied, "a replayed stale delta was ignored")
     eq(view(rd), view(ml), "store unchanged by the replay")
 end)
@@ -456,7 +472,7 @@ test("two peers, one drops a delta, both converge", function()
     deltaChange(ml, "L1", "rolling")
     do
         local msgs = WIRE; WIRE = {}
-        for _, m in ipairs(msgs) do if m.sender == "ML" then r1.chan:OnReceive(m.sender, m.msg) end end
+        for _, m in ipairs(msgs) do if m.sender == "ML" then r1.chan:OnReceive(m.sender, m.value) end end
     end
     deltaChange(ml, "L1", "resolved")        -- R2 will see this with a gap
     deliver()                                -- R1 contiguous; R2 gaps -> RQ
@@ -528,7 +544,7 @@ test("a stale, backlogged snapshot does not regress a peer that rode deltas past
 
     -- The backlogged snapshot finally lands. It must NOT drag the peer (or its ledger) backward.
     for _, m in ipairs(held) do
-        if m.dist ~= "WHISPER" or m.target == "Raider" then rd.chan:OnReceive(m.sender, m.msg) end
+        if m.dist ~= "WHISPER" or m.target == "Raider" then rd.chan:OnReceive(m.sender, m.value) end
     end
     eq(rd.chan.lastRev, aheadRev, "stale snapshot did not regress lastRev")
     eq(view(rd), view(ml), "peer kept the newer ledger; stale snapshot ignored")
@@ -545,15 +561,14 @@ test("authority sends ONE snapshot per peer in flight, ignoring a flood of repea
     -- The peer floods requests (retries on the same reqId, plus re-requests with new reqIds after it
     -- gives up) while a snapshot is still draining. The authority must emit exactly one snapshot and
     -- ignore the rest, or it backlogs faster than the wire drains.
-    local SEP = string.char(30)
-    local function rq(reqId) return table.concat({ "RQ", "Raider", reqId }, SEP) end
+    local function rq(reqId) return { "RQ", "Raider", reqId } end
     ml.chan:OnReceive("Raider", rq("r1"))            -- first request -> one snapshot
     ml.chan:OnReceive("Raider", rq("r1"))            -- retry, same reqId, snapshot still in flight
     ml.chan:OnReceive("Raider", rq("r2"))            -- new reqId after a "give-up", still in flight
     ml.chan:OnReceive("Raider", rq("r3"))
 
     local snaps = 0
-    for _, m in ipairs(WIRE) do if firstField(m.msg) == "SB" then snaps = snaps + 1 end end
+    for _, m in ipairs(WIRE) do if firstField(m) == "SNAP" then snaps = snaps + 1 end end
     eq(snaps, 1, "only one snapshot emitted despite four requests")
 end)
 

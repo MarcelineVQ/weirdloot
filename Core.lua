@@ -9,7 +9,7 @@
 --                                         the ledger; raiders mirror via the synced snapshot.)
 --   RAID_ROSTER_UPDATE / PARTY_*       -> RefreshRoster + RefreshLootAuthority (who is the ML)
 --   PLAYER_LOGIN / ENTERING_WORLD      -> init, restore the session, recheck authority once data settles
---   CHAT_MSG_ADDON                     -> handled by AceComm (Comm.lua / the WeirdSync channel)
+--   CHAT_MSG_ADDON                     -> WeirdComm reassembles -> Comm.lua RouteComm (live-roll / WeirdSync)
 --   LOOT_OPENED / LOOT_BIND_CONFIRM    -> AutoLoot;   TRADE_SHOW / bag deltas -> TradeDeliver
 --
 -- Authority: the ML owns the live ledger and runs all mutation (reconcile/resolve/payout); raiders

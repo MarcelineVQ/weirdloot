@@ -110,15 +110,18 @@ end
 -- the library. The revision still advances on a dropped send, so the receiver sees the gap.
 function addon:EnsureSyncDropHook()
     local chan = self.syncChannel
-    if not chan or chan.__dropHooked then return end
+    if not chan or not chan.cb or chan.__dropHooked then return end
     chan.__dropHooked = true
-    local orig = chan.SendCommMessage
-    chan.SendCommMessage = function(selfChan, prefix, msg, dist, target, prio)
+    -- WeirdSync is transport-agnostic: it sends via chan.cb.send. Wrap that to swallow the next N
+    -- outgoing sync messages. The revision still advances on a dropped send, so the receiver hits a
+    -- real rev gap and resyncs -- exactly the lost-message path, with no drop logic in the library.
+    local orig = chan.cb.send
+    chan.cb.send = function(value, dist, target, prio)
         if (addon._syncDropCount or 0) > 0 then
             addon._syncDropCount = addon._syncDropCount - 1
             return -- simulate a lost addon message
         end
-        return orig(selfChan, prefix, msg, dist, target, prio)
+        return orig(value, dist, target, prio)
     end
 end
 
@@ -139,6 +142,10 @@ function addon:HandleDebugCommand(rest)
         self:Print(string.format("Core debug log: %s, %d record(s), seq %d, cap %d.%s",
             log.enabled and "ON" or "OFF", #log.records, log.seq or 0, log.max or DEFAULT_MAX,
             drop > 0 and (" Dropping next " .. drop .. " sync msg(s).") or ""))
+        if self.comm and self.comm.SendRate then
+            self:Print(string.format("WeirdComm send rate: %d msg this second (mute risk >= %d, server limit 100).",
+                self.comm:SendRate(), self.comm.muteWarn or 80))
+        end
     elseif verb == "on" then
         log.enabled = true
         self:InitializeDebug()

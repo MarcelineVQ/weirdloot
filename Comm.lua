@@ -20,21 +20,10 @@ local function isInRaid(name)
     return false
 end
 
--- A lot on the wire is the tag "L" followed by the structured EncodeLot array. The tag lets a
--- mixed snapshot (meta / attendee / lot lines) be demultiplexed on apply; deltas reuse the same
--- tagged shape so one decoder serves both paths. WeirdSync treats the whole line as opaque.
-local function lotLine(self, lot)
-    local f = { "L" }
-    for _, v in ipairs(self:EncodeLot(lot)) do f[#f + 1] = v end
-    return f
-end
-
-local function decodeLotLine(self, f)
-    -- strip the "L" tag -> the original EncodeLot array (field 1 sessionId, 2 id, ... 9 seq, 10 remaining)
-    local lotFields = {}
-    for i = 2, #f do lotFields[#lotFields + 1] = f[i] end
-    return self:DecodeLot(lotFields), tonumber(lotFields[9]) or 0, tonumber(lotFields[10])
-end
+-- A lot on the wire is a structured value tagged "L" with NAMED fields (not a positional array):
+-- see addon:BuildLotValue / addon:DecodeLotValue below. The tag lets a mixed snapshot (meta /
+-- attendee / lot lines) be demultiplexed on apply; deltas reuse the same shape. WeirdSync treats
+-- the whole value as opaque and never inspects it; LibSerialize+LibDeflate carry it.
 
 -- Stash the ML's roll countdown for a lot so the raider's roll-popup restore (SyncRollPopups, run
 -- on ledgerChanged) can show the true remaining time. Must be set BEFORE the apply that emits
@@ -48,65 +37,87 @@ function addon:StashRollRemaining(lot, remaining)
     end
 end
 
-function addon:InitializeComm()
-    self.comm = {}              -- live-roll comm scratch; all session-mirror state lives in the WeirdSync channel
-    self.syncPrefix = "WLSYNC"  -- WeirdSync owns this prefix; the live-roll lane stays on self.prefix
+-- inbound tags that belong to the WeirdSync reliability layer; everything else is live-roll.
+local SYNC_TAGS = { SNAP = true, D = true, H = true, RQ = true, AK = true }
 
-    -- AceComm-3.0 owns chunking + reassembly and paces every send through ChatThrottleLib. We use
-    -- it directly for the live-roll lane (DROP/WIN/CANCEL/RSP/SELECTION/NAMED_ITEMS) on self.prefix.
-    local AceComm = LibStub and LibStub("AceComm-3.0", true)
-    if AceComm then
-        AceComm:Embed(self)
-        self:RegisterComm(self.prefix, "OnCommReceived")
-    else
-        self:Print("AceComm-3.0 not found; raid sync disabled.")
+function addon:InitializeComm()
+    self.syncPrefix = "WLSYNC"  -- retained only as the WeirdSync registry key (not a wire prefix now)
+
+    local WeirdComm = LibStub and LibStub("WeirdComm-1.0", true)
+    local WeirdSync = LibStub and LibStub("WeirdSync-1.0", true)
+    if not (WeirdComm and WeirdComm.NewChannel and WeirdSync and WeirdSync.NewChannel) then
+        self:Print("WeirdComm/WeirdSync not found; raid sync disabled.")
+        return
     end
 
+    -- ONE transport for ALL of WeirdLoot's traffic (session mirror + live roll). WeirdComm sends each
+    -- logical message as a Lua VALUE: serialize -> compress -> chunk <=255B -> pace by message count
+    -- under ChromieCraft's per-player mute -> reassemble. A single shared pacer keeps our TOTAL addon
+    -- output under the mute (the server counts every prefix together), and the priority queue lets an
+    -- ALERT roll popup preempt a BULK ledger sync. Inbound is routed by message tag (RouteComm).
+    self.comm = WeirdComm:NewChannel(self.prefix, {
+        send       = function(p, text, dist, target) if SendAddonMessage then SendAddonMessage(p, text, dist, target) end end,
+        onMessage  = function(value, sender, dist) self:RouteComm(value, sender, dist) end,
+        getTime    = function() return (GetTime and GetTime()) or 0 end,
+        selfName   = util:GetPlayerName("player"),
+        log        = function(ev, data) self:LogCoreEvent(ev, data) end,
+        -- Debug-mode notification: the server gives no signal for an addon-flood mute (it only silences
+        -- our REGULAR chat + winner-whispers), so the only place we can warn is our own send rate.
+        warn       = function(n)
+            if WeirdLootDebugLog and WeirdLootDebugLog.enabled then
+                self:Print(string.format("|cffff5555[WeirdComm]|r mute risk: %d addon msgs this second (server limit 100; would silence chat/whispers).", n))
+            end
+        end,
+    })
+
     -- The reliable session mirror is delegated to WeirdSync: it owns the revision, snapshot/delta
-    -- framing, gap detection + resync, request retry, targeted-send ack, and give-up. We own only
-    -- payload semantics: a snapshot/delta line is { tag, fields... } that we encode/decode here.
-    local WeirdSync = LibStub and LibStub("WeirdSync-1.0", true)
-    if WeirdSync then
-        self.syncChannel = WeirdSync:NewChannel(self.syncPrefix, {
-            isAuthority    = function() return self:IsAuthorizedLootMaster() end,
-            authorityName  = function() return self:GetLootMasterName() end,
-            rosterContains = function(name) return isInRaid(name) end,
-            epoch          = function() return self:GetCurrentSession().id or "" end,
-            buildSnapshot  = function(emit) self:SyncBuildSnapshot(emit) end,
-            applySnapshot  = function(lines, ep) self:SyncApplySnapshot(lines, ep) end,
-            applyLine      = function(fields) self:SyncApplyLine(fields) end,
-            log            = function(ev, data) self:LogCoreEvent(ev, data) end,
-            -- Retry schedule: flatter than a steep exponential so a resync after a gap/reload recovers
-            -- on a steady cadence instead of ballooning to ~8s gaps. A 1.0s first resend lets a normal
-            -- message land before we retry (a 0.5s first retry fires before delivery and just amplifies),
-            -- and the gentle 1.3x growth (1.0,1.3,1.7,2.2,2.9,3.7,4.8,6.3s) keeps a ~24s give-up horizon.
-            backoffBase    = 1.0,
-            backoffMul     = 1.3,
-            maxAttempts    = 8,
-            -- Authority re-announces its rev every 30s so a raider that missed the last delta of a
-            -- now-quiet session heals itself (no manual resync button needed).
-            heartbeat      = 30,
-        })
+    -- framing, gap detection + resync, request retry, targeted-send ack, and give-up. It is transport
+    -- agnostic: we hand it cb.send (route to the shared channel) and feed inbound via RouteComm.
+    self.syncChannel = WeirdSync:NewChannel(self.syncPrefix, {
+        send           = function(value, dist, target, prio) self.comm:Send(value, dist, target, prio) end,
+        isAuthority    = function() return self:IsAuthorizedLootMaster() end,
+        authorityName  = function() return self:GetLootMasterName() end,
+        rosterContains = function(name) return isInRaid(name) end,
+        epoch          = function() return self:GetCurrentSession().id or "" end,
+        buildSnapshot  = function(emit) self:SyncBuildSnapshot(emit) end,
+        applySnapshot  = function(lines, ep) self:SyncApplySnapshot(lines, ep) end,
+        applyLine      = function(fields) self:SyncApplyLine(fields) end,
+        log            = function(ev, data) self:LogCoreEvent(ev, data) end,
+        -- Retry schedule: flatter than a steep exponential so a resync after a gap/reload recovers on a
+        -- steady cadence. 1.0s first resend lets a message land before we retry; 1.3x growth keeps a
+        -- ~24s give-up horizon. Heartbeat re-announces rev every 30s so a quiet-session miss self-heals.
+        backoffBase    = 1.0,
+        backoffMul     = 1.3,
+        maxAttempts    = 8,
+        heartbeat      = 30,
+    })
+
+    -- (WeirdComm self-wires CHAT_MSG_ADDON receive + self-drives its pacer Tick; WeirdSync drives
+    -- its own retry Tick. Nothing more to wire here.)
+end
+
+-- Route a reassembled inbound value to the right handler. WeirdComm already drops our exact self-echo;
+-- the normName check here also covers a realm-suffixed echo. Sync tags go to WeirdSync; the rest are
+-- live-roll messages.
+function addon:RouteComm(value, sender, distribution)
+    if type(value) ~= "table" then return end
+    if util:NormalizeKey(util:GetPlayerName("player") or "") == util:NormalizeKey(sender or "") then return end
+    if SYNC_TAGS[value[1]] then
+        self.syncChannel:OnReceive(sender, value)
     else
-        self:Print("WeirdSync-1.0 not found; raid sync disabled.")
+        self:HandleCommMessage(sender, value)
     end
 end
 
--- One logical message per call. AceComm splits anything over ~254 bytes into
--- ordered multipart chunks and throttles them; keep a single priority so the
--- session burst (SESSION_BEGIN -> ATTENDEE -> ITEM ...) stays in sequence.
--- prio: CTL lane. Session-mirror traffic (snapshots, deltas, attendees) defaults to BULK so
--- the time-sensitive live-roll lane (DROP/WIN/CANCEL/RSP -> ALERT) always preempts it. On a
--- flood-limited server the popup a raider sees must not queue behind a ledger sync.
+-- Live-roll send. The message is a VALUE { command, arg1, arg2, ... } carried by the shared WeirdComm
+-- channel (no manual string codec, no separate AceComm lane). Args are stringified to preserve the
+-- string semantics the handlers were written against.
 function addon:SendLargeMessage(command, values, distribution, target, prio)
-    if not self.SendCommMessage then
-        return
-    end
-    local logical = command .. "|" .. util:JoinEncoded(values or {})
-    self:SendCommMessage(self.prefix, logical, distribution, target, prio or "BULK")
-    -- trace every outgoing message so the wire load (delta vs snapshot, coalescing, priority
-    -- lane) is verifiable from the log: e.g. 12 picks should produce 0 sends, a roll one ALERT DROP.
-    self:LogCoreEvent("send", { cmd = command, bytes = #logical, prio = prio or "BULK", dist = distribution })
+    if not self.comm then return end
+    local value = { command }
+    for _, v in ipairs(values or {}) do value[#value + 1] = tostring(v) end
+    self.comm:Send(value, distribution, target, prio or "BULK")
+    self:LogCoreEvent("send", { cmd = command, prio = prio or "BULK", dist = distribution })
 end
 
 -- responses map <-> compact string. Player keys are normalized (no '|'/':'/','/'='), so a
@@ -155,98 +166,71 @@ local function renderRemoteRecord(lotId, itemId, count, winners)
 end
 
 -- The result BREAKDOWN (who rolled which bracket and what, the prioritized roll-off, the winners
--- with their rolls, plus the spec-priority / LC context) is the part of a resolved record the ML
--- builds locally; the minimal wire above carries only winner names, so a raider never saw it. Pack
--- the structured pieces into one extra lot field so a raider renders the SAME detail locally:
--- class/spec/status come from the synced roster, item text from its own GetItemInfo (still no
--- rendered text on the wire). This rides the normal reliable lot sync, not the popup fast path.
--- Layered control-char delimiters, none of which is WeirdSync's field separator (char 30).
-local BLOB_PART = string.char(29)   -- top-level parts of the blob
-local BLOB_ROW = string.char(28)    -- rows within a list part
-local BLOB_COL = string.char(31)    -- columns within a row
-
-local function packRows(list, cols)
-    local rows = {}
-    for _, d in ipairs(list or {}) do
-        rows[#rows + 1] = table.concat(cols(d), BLOB_COL)
+-- with their rolls, plus the spec-priority / LC context) is built by the ML; the raider can't derive
+-- it, so it rides the wire as a nested table on the lot value. Only the non-derivable pieces (names,
+-- responses, rolls, spec/LC text) cross: class/spec/status come from the synced roster and item text
+-- from local GetItemInfo, so no rendered text/links go on the wire. LibSerialize dedups the names
+-- (which recur heavily across rollers/winners/lots); no manual delimiters, no positional fields.
+function addon:BuildRecordValue(record)
+    if not record then return nil end
+    local function rows(list, pick)
+        local out = {}
+        for _, d in ipairs(list or {}) do out[#out + 1] = pick(d) end
+        return out
     end
-    return table.concat(rows, BLOB_ROW)
-end
-
-local function splitBy(text, sep)
-    local out = {}
-    if text and text ~= "" then
-        for piece in (text .. sep):gmatch("(.-)" .. sep) do
-            out[#out + 1] = piece
-        end
-    end
-    return out
-end
-
--- Pack a resolved record's structured breakdown (ML side). Empty string for a record with no parts.
-function addon:EncodeResultBlob(record)
-    if not record then return "" end
-    local parts = {
-        packRows(record.allRollerDetails, function(d)
-            return { d.name or "", d.responseType or "", d.rollText or "" }
+    return {
+        allRollerDetails = rows(record.allRollerDetails, function(d)
+            return { name = d.name, responseType = d.responseType, rollText = d.rollText }
         end),
-        packRows(record.rollDetails, function(d)
-            return { d.name or "", tostring(d.roll or ""), d.auto and "1" or "", d.isNamed and "1" or "" }
+        rollDetails = rows(record.rollDetails, function(d)
+            return { name = d.name, roll = d.roll, auto = d.auto or nil, isNamed = d.isNamed or nil }
         end),
-        packRows(record.winnerDetails, function(d)
-            return { d.name or "", tostring(d.roll or ""), d.auto and "1" or "" }
+        winnerDetails = rows(record.winnerDetails, function(d)
+            return { name = d.name, roll = d.roll, auto = d.auto or nil }
         end),
-        record.specPriorityText or "",
-        record.lcNamesText or "",
-        record.isLootCouncil and "1" or "",
+        specPriorityText = record.specPriorityText,
+        lcNamesText = record.lcNamesText,
+        isLootCouncil = record.isLootCouncil or nil,
     }
-    return table.concat(parts, BLOB_PART)
 end
 
--- Rebuild a full result record (raider side) from the minimal record plus the breakdown blob. Names
+-- Rebuild a full result record (raider side) from the minimal record plus the breakdown table. Names
 -- ride the wire; class/spec/status are filled from this client's roster, and the detail text is
 -- rendered here through the SAME BuildResultDetail the ML uses, so the two read identically.
-local function renderRemoteRecordFull(self, lotId, itemId, count, winners, blob)
+local function renderRemoteRecordFull(self, lotId, itemId, count, winners, rv)
     local record = renderRemoteRecord(lotId, itemId, count, winners)
     local function profile(name)
         return self:GetAttendee(name) or self:GetRosterProfile(name) or {}
     end
 
-    local parts = splitBy(blob, BLOB_PART)
-
     record.allRollerDetails = {}
-    for _, row in ipairs(splitBy(parts[1], BLOB_ROW)) do
-        local c = splitBy(row, BLOB_COL)
-        local prof = profile(c[1])
+    for _, d in ipairs(rv.allRollerDetails or {}) do
+        local prof = profile(d.name)
         record.allRollerDetails[#record.allRollerDetails + 1] = {
-            name = c[1],
-            responseType = (c[2] ~= "" and c[2]) or nil,
-            rollText = (c[3] ~= "" and c[3]) or nil,
+            name = d.name, responseType = d.responseType, rollText = d.rollText,
             className = prof.className, specName = prof.specName, status = prof.status,
         }
     end
 
     record.rollDetails = {}
-    for _, row in ipairs(splitBy(parts[2], BLOB_ROW)) do
-        local c = splitBy(row, BLOB_COL)
-        local prof = profile(c[1])
+    for _, d in ipairs(rv.rollDetails or {}) do
+        local prof = profile(d.name)
         record.rollDetails[#record.rollDetails + 1] = {
-            name = c[1], roll = tonumber(c[2]), auto = c[3] == "1", isNamed = c[4] == "1",
+            name = d.name, roll = d.roll, auto = d.auto or false, isNamed = d.isNamed or false,
             className = prof.className, specName = prof.specName, status = prof.status,
         }
     end
 
     record.winnerDetails = {}
-    for _, row in ipairs(splitBy(parts[3], BLOB_ROW)) do
-        local c = splitBy(row, BLOB_COL)
+    for _, d in ipairs(rv.winnerDetails or {}) do
         record.winnerDetails[#record.winnerDetails + 1] = {
-            name = c[1], roll = tonumber(c[2]), auto = c[3] == "1", className = profile(c[1]).className,
+            name = d.name, roll = d.roll, auto = d.auto or false, className = profile(d.name).className,
         }
     end
 
-    record.specPriorityText = (parts[4] ~= "" and parts[4]) or nil
-    record.lcNamesText = (parts[5] ~= "" and parts[5]) or nil
-    record.isLootCouncil = parts[6] == "1"
+    record.specPriorityText = rv.specPriorityText
+    record.lcNamesText = rv.lcNamesText
+    record.isLootCouncil = rv.isLootCouncil or false
     if record.isLootCouncil then
         record.winnersText = "Loot Council"
     end
@@ -264,54 +248,52 @@ function addon:RollRemaining(lot)
     return tostring(math.max(0, roll.deadline - ((GetTime and GetTime()) or 0)))
 end
 
--- Structured-only encoding of one lot for the wire (shared by the full snapshot and deltas):
--- ids + state + live count + responses + winner NAMES + a removed flag + roll remaining. No text.
-function addon:EncodeLot(lot)
+-- Structured encoding of one lot (shared by the full snapshot and deltas), tagged "L": ids + state +
+-- live count + responses map + winner NAMES + removed flag + roll remaining + the resolved breakdown.
+-- Named fields, not positional; no rendered text/links (the raider derives those locally).
+function addon:BuildLotValue(lot)
     local winners = {}
     for _, a in ipairs(lot.awards or {}) do
         if a.winner then winners[#winners + 1] = a.winner end
     end
-    return {
-        self:GetCurrentSession().id or "",
-        lot.id,
-        tostring(lot.itemId or 0),
-        lot.state,
-        tostring(self.lootCore:LiveCount(lot.id)),
-        encodeResponses(lot.responses),
-        table.concat(winners, ","),
-        lot.removed and "1" or "",
-        tostring(self.lootCore.seq or 0),   -- field 9: core seq (used by deltas; ignored in a full snapshot)
-        self:RollRemaining(lot),            -- field 10: roll countdown seconds (rolling lots only)
-        -- field 11: full result breakdown (resolved lots only) so raiders see what the ML sees
-        (lot.state == self.lootCore.STATE.RESOLVED and lot.record) and self:EncodeResultBlob(lot.record) or "",
+    local v = {
+        "L",
+        id = lot.id,
+        itemId = lot.itemId or 0,
+        state = lot.state,
+        count = self.lootCore:LiveCount(lot.id),
+        responses = lot.responses,                  -- map sent directly (dedups across lots)
+        winners = winners,
+        removed = lot.removed or nil,
+        seq = self.lootCore.seq or 0,               -- used by deltas; ignored in a full snapshot
+        rollRemaining = tonumber(self:RollRemaining(lot)),   -- number for a rolling lot, else nil
     }
+    if lot.state == self.lootCore.STATE.RESOLVED and lot.record then
+        v.record = self:BuildRecordValue(lot.record)
+    end
+    return v
 end
 
--- Rebuild a lot table (core's shape) from wire fields, rendering the record locally.
-function addon:DecodeLot(fields)
+-- Rebuild a lot table (core's shape) from a structured wire value; rendering the record locally.
+-- Returns lot, seq, rollRemaining (the last two drive delta seq tracking + roll-popup restore).
+function addon:DecodeLotValue(v)
     local lot = {
-        id = fields[2],
-        itemId = tonumber(fields[3]),
-        state = fields[4],
-        count = tonumber(fields[5]) or 0,
-        responses = decodeResponses(fields[6]),
-        removed = (fields[8] == "1") or nil,
+        id = v.id,
+        itemId = v.itemId,
+        state = v.state,
+        count = v.count or 0,
+        responses = v.responses or {},
+        removed = v.removed or nil,
     }
     if lot.state == self.lootCore.STATE.RESOLVED then
-        local winners = {}
-        for _, w in ipairs(util:Split(fields[7] or "", ",")) do
-            if w ~= "" then winners[#winners + 1] = w end
-        end
-        -- field 11 carries the full breakdown; fall back to the minimal record when it is absent
-        -- (an older ML, or a lot synced before this field existed).
-        local blob = fields[11]
-        if blob and blob ~= "" then
-            lot.record = renderRemoteRecordFull(self, lot.id, lot.itemId, lot.count, winners, blob)
+        local winners = v.winners or {}
+        if v.record then
+            lot.record = renderRemoteRecordFull(self, lot.id, lot.itemId, lot.count, winners, v.record)
         else
             lot.record = renderRemoteRecord(lot.id, lot.itemId, lot.count, winners)
         end
     end
-    return lot
+    return lot, v.seq or 0, v.rollRemaining
 end
 
 -- Host snapshot builder for WeirdSync. Emits one line per piece of state: an "M" meta line
@@ -326,7 +308,7 @@ function addon:SyncBuildSnapshot(emit)
     end
     for _, lot in ipairs(core:All()) do
         if lot.state == core.STATE.RESOLVED or core:LiveCount(lot.id) > 0 then
-            emit(lotLine(self, lot))
+            emit(self:BuildLotValue(lot))
         end
     end
 end
@@ -353,7 +335,7 @@ function addon:SyncApplySnapshot(lines, epoch)
                 name = f[2], className = f[3], specName = f[4], status = f[5],
             }
         elseif tag == "L" then
-            local lot, lotSeq, remaining = decodeLotLine(self, f)
+            local lot, lotSeq, remaining = self:DecodeLotValue(f)
             lots[#lots + 1] = lot
             seq = math.max(seq, lotSeq)
             self:StashRollRemaining(lot, remaining)   -- before ApplyRemote -> ledgerChanged -> SyncRollPopups
@@ -365,7 +347,7 @@ end
 -- Host delta applier (raider): one lot upsert.
 function addon:SyncApplyLine(fields)
     if fields[1] ~= "L" then return end
-    local lot, lotSeq, remaining = decodeLotLine(self, fields)
+    local lot, lotSeq, remaining = self:DecodeLotValue(fields)
     self:StashRollRemaining(lot, remaining)   -- before ApplyRemoteLot -> ledgerChanged -> SyncRollPopups
     self.lootCore:ApplyRemoteLot(lot, lotSeq)
 end
@@ -403,7 +385,7 @@ function addon:AutoBroadcastSession(force)
     local lines = {}
     for _, id in ipairs(ids) do
         local lot = core:Get(id)
-        if lot then lines[#lines + 1] = lotLine(self, lot) end
+        if lot then lines[#lines + 1] = self:BuildLotValue(lot) end
     end
     self.syncChannel:NotifyChanged(lines)
     self.syncChannel:Broadcast(false)
@@ -517,25 +499,15 @@ function addon:OnRollStateMessage(fields)
     self:RefreshInterestPopup(roll)
 end
 
--- AceComm receive callback for the live-roll lane (self.prefix). Session-mirror traffic rides
--- the WeirdSync channel's own prefix and is dispatched straight to it, so it never reaches here.
+-- Live-roll message handler. Reached via RouteComm (the shared WeirdComm channel's dispatcher) for
+-- any non-sync tag; the value is { command, arg1, ... } and fields below are the args after command.
 -- We never receive our own RAID/PARTY messages (the client drops them); keep the self-skip
 -- defensively in case of a self-WHISPER echo.
-function addon:OnCommReceived(prefix, message, distribution, sender)
-    if prefix ~= self.prefix then
-        return
-    end
-
-    if util:NormalizeKey(util:GetPlayerName("player") or "") == util:NormalizeKey(sender or "") then
-        return
-    end
-
-    self:HandleCommMessage(sender, message)
-end
-
-function addon:HandleCommMessage(sender, logical)
-    local fields = util:SplitEncoded(logical)
-    local command = table.remove(fields, 1)
+function addon:HandleCommMessage(sender, value)
+    if type(value) ~= "table" then return end
+    local command = value[1]
+    local fields = {}
+    for i = 2, #value do fields[#fields + 1] = value[i] end
 
     if command == "SELECTION" then
         if not self:IsAuthorizedLootMaster() then

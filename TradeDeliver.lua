@@ -18,9 +18,10 @@
     item X -- deliver it when he trades me."
 
   DEPENDENCIES (embed alongside this file, load first)
-    LibStub, CallbackHandler-1.0, ChatThrottleLib, AceComm-3.0.
+    LibStub, ChatThrottleLib.
     LibStub is used to publish/version the library; ChatThrottleLib paces whispers
-    and AceComm paces+chunks addon messages so a burst can't get you disconnected.
+    so a burst can't get you disconnected. (Addon-message sync, if ever added, should
+    use the host addon's shared WeirdComm channel, not a private transport.)
 
   ----------------------------------------------------------------------------
   PUBLIC API
@@ -383,8 +384,6 @@ end
 local Engine = {}
 Engine.__index = Engine
 
-local AceComm = LibStub and LibStub("AceComm-3.0", true)
-
 function TradeDeliver:New(config)
     config = config or {}
     assert(type(config.db) == "table", "TradeDeliver:New requires config.db (a table)")
@@ -413,8 +412,6 @@ function TradeDeliver:New(config)
     e.pending = nil         -- { key, placed = { {it, qty}, ... } }  consumed on complete
     e.fillState = nil       -- { key, name, plan, destBags, waiting }
     e.fillGen = 0           -- invalidates stale settle/fallback timers
-
-    if AceComm then e._comm = {}; AceComm:Embed(e._comm) end
 
     e.frame = CreateFrame("Frame")
     e.frame:RegisterEvent("TRADE_SHOW")
@@ -475,13 +472,11 @@ function Engine:_whisper(target, text)
     end
 end
 
--- addon-channel send (throttled + chunked via AceComm); for a future sync layer
+-- addon-channel send; unused stub for a future sync layer. If TradeDeliver ever needs raid sync,
+-- route it through the addon's shared WeirdComm channel (one pacer for the whole addon), not a
+-- private transport.
 function Engine:SendComm(text, distribution, target)
-    if self._comm then
-        self._comm:SendCommMessage(self.prefix, text, distribution or "RAID", target, "NORMAL")
-    else
-        SendAddonMessage(self.prefix, text, distribution or "RAID", target)
-    end
+    SendAddonMessage(self.prefix, text, distribution or "RAID", target)
 end
 
 -- ---- ledger -------------------------------------------------------------

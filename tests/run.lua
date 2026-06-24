@@ -223,6 +223,23 @@ local function makeWorld(playerName, isML)
     }
     libs["AceComm-3.0"] = aceComm
     libs["CallbackHandler-1.0"] = { New = function() return {} end }
+    -- Fake WeirdComm: pass-through transport for the WeirdSync (WLSYNC) lane. Records the logical
+    -- VALUE on the wire (deep-copied to mimic serialize-on-send). The real codec/chunk/pace is
+    -- covered by tests/weirdcomm.lua; the real-lib seam by tests/integration.lua.
+    local function wcDeepcopy(v)
+        if type(v) ~= "table" then return v end
+        local o = {}; for k, val in pairs(v) do o[k] = wcDeepcopy(val) end; return o
+    end
+    libs["WeirdComm-1.0"] = {
+        NewChannel = function(_, prefix, opts)
+            return {
+                Send = function(_, value, dist, target, prio)
+                    WIRE[#WIRE + 1] = { prefix = prefix, value = wcDeepcopy(value), dist = dist, target = target, sender = playerName, prio = prio }
+                end,
+                Tick = function() end,
+            }
+        end,
+    }
     local LibStub = setmetatable({
         NewLibrary = function(_, name) libs[name] = libs[name] or {}; return libs[name] end,
         GetLibrary = function(_, name) return libs[name] end,
@@ -295,20 +312,16 @@ local function owedCount(w)
     return n
 end
 
--- deliver the shared wire from one world to another (raider mirror). Sync-prefix traffic goes
--- straight to the WeirdSync channel (as AceComm's prefix dispatch would in-game), honouring
--- WHISPER targeting; live-roll traffic goes through OnCommReceived.
+-- deliver the shared wire from one world to another (raider mirror). All WeirdLoot traffic (session
+-- mirror + live roll) now rides ONE WeirdComm channel as a decoded VALUE; the addon's RouteComm
+-- dispatcher routes by tag (sync -> WeirdSync, else -> live-roll). Honour WHISPER targeting.
 local function flushWireTo(target, fromSender)
     local msgs = WIRE; WIRE = {}
     for _, m in ipairs(msgs) do
-        if m.sender ~= target.player then
+        if m.value and m.sender ~= target.player then
             local sender = m.sender or fromSender or "Masterlooter"
-            if m.prefix == target.addon.syncPrefix and target.addon.syncChannel then
-                if m.dist ~= "WHISPER" or m.target == target.player then
-                    target.addon.syncChannel:OnReceive(sender, m.msg)
-                end
-            else
-                target.addon:OnCommReceived(m.prefix, m.msg, m.dist or "RAID", sender)
+            if m.dist ~= "WHISPER" or m.target == target.player then
+                target.addon:RouteComm(m.value, sender, m.dist or "RAID")
             end
         end
     end
@@ -803,11 +816,10 @@ test("delta sync: a single change sends a LOTD delta, not a full snapshot", func
     -- a single state change must delta-sync (D), never a full snapshot (SB) burst
     clearWire()
     ml.addon:StartLiveRoll(lot.id)
-    local SEP = string.char(30)
     local snaps, deltas = 0, 0
     for _, m in ipairs(WIRE) do
-        local cmd = string.match(m.msg, "^[^|" .. SEP .. "]+")
-        if cmd == "SB" then snaps = snaps + 1 end
+        local cmd = m.value and m.value[1]
+        if cmd == "SNAP" then snaps = snaps + 1 end
         if cmd == "D" then deltas = deltas + 1 end
     end
     eq(snaps, 0, "no full snapshot emitted for a single change")
@@ -900,7 +912,7 @@ end)
 
 -- ---- live pick list (RSTATE): raiders see who is rolling, in real time ----
 local function countKeys(t) local n = 0 for _ in pairs(t or {}) do n = n + 1 end return n end
-local function countWire(pat) local n = 0 for _, m in ipairs(WIRE) do if m.msg:match(pat) then n = n + 1 end end return n end
+local function countWire(tag) local n = 0 for _, m in ipairs(WIRE) do if m.value and m.value[1] == tag then n = n + 1 end end return n end
 local function rollFor(w, lotId) return w.addon.live and w.addon.live.rolls and w.addon.live.rolls[lotId] end
 
 -- shared setup: ML opens a lot, starts a roll, raider receives the DROP -> open roll popup.
@@ -958,7 +970,7 @@ test("live pick list: a burst of picks coalesces to one RSTATE per flush", funct
     ml.addon:SetPlayerResponse(lot.id, "Cara", "os")
     clearWire()
     ml.addon:FlushRollState()
-    eq(countWire("^RSTATE"), 1, "three picks collapse to a single RSTATE on flush")
+    eq(countWire("RSTATE"), 1, "three picks collapse to a single RSTATE on flush")
 end)
 
 test("live pick list: RSTATE is display-only and never writes the raider's ledger", function()
@@ -1661,13 +1673,16 @@ test("guard: reconcile retires an un-rolled copy before an owed one", function()
     eq(w.addon.lootCore:Get(lotId).awards[1].state, "owed", "the owed copy was preserved")
 end)
 
-test("guard: a stray snapshot line without an SB is ignored (no crash)", function()
+test("guard: a malformed/unknown sync value is ignored (no crash)", function()
     local w = makeWorld("Raidertwo", false)
-    local SEP = string.char(30)
-    -- an SE (snapshot entry) arriving with no preceding SB must be dropped, not staged.
-    local stray = table.concat({ "SE", "L", "s", "L:1", "40005", "pending", "1" }, SEP)
-    local ok = pcall(function() w.addon.syncChannel:OnReceive("Masterlooter", stray) end)
-    check(ok, "stray snapshot line handled without error")
+    -- WeirdComm hands WeirdSync a decoded VALUE; a non-table or an unknown-tag table must be
+    -- dropped, not staged. (There is no longer a stray "SE without SB": a snapshot is atomic.)
+    local ok = pcall(function()
+        w.addon.syncChannel:OnReceive("Masterlooter", "not a table")
+        w.addon.syncChannel:OnReceive("Masterlooter", { "BOGUS", "x", "y" })
+        w.addon.syncChannel:OnReceive("Masterlooter", {})
+    end)
+    check(ok, "malformed sync values handled without error")
     eq(#w.addon.lootCore:All(), 0, "nothing staged into the ledger")
 end)
 
@@ -1941,12 +1956,15 @@ local function loadReport()
         local byCmd, byPrio = {}, { ALERT = 0, BULK = 0 }
         local logical, chunks, bytes = 0, 0, 0
         for _, m in ipairs(WIRE) do
-            local cmd = string.match(m.msg, "^[^|" .. string.char(30) .. "]+") or "?"
+            -- live-roll lane is AceComm strings (m.msg, modelled by CTL); sync lane is now WeirdComm
+            -- values (m.value) and does NOT use CTL, so it contributes its tag but 0 CTL bytes here.
+            local cmd = (m.value and m.value[1]) or string.match(m.msg or "", "^[^|" .. string.char(30) .. "]+") or "?"
             byCmd[cmd] = (byCmd[cmd] or 0) + 1
             local prio = m.prio or "BULK"
             byPrio[prio] = (byPrio[prio] or 0) + 1
-            local c = math.max(1, math.ceil(#m.msg / MAXLEN))
-            logical = logical + 1; chunks = chunks + c; bytes = bytes + #m.msg + c * OVERHEAD
+            local len = m.msg and #m.msg or 0
+            local c = m.msg and math.max(1, math.ceil(len / MAXLEN)) or 0
+            logical = logical + 1; chunks = chunks + c; bytes = bytes + len + c * OVERHEAD
         end
         WIRE = {}
         return { label = label, logical = logical, chunks = chunks, bytes = bytes,
@@ -2021,10 +2039,11 @@ local function bossDropReport()
         for _, m in ipairs(WIRE) do
             local prio = m.prio or "BULK"
             if (not filter) or prio == filter then
-                local cmd = string.match(m.msg, "^[^|" .. string.char(30) .. "]+") or "?"
+                local cmd = (m.value and m.value[1]) or string.match(m.msg or "", "^[^|" .. string.char(30) .. "]+") or "?"
                 byCmd[cmd] = (byCmd[cmd] or 0) + 1
-                local c = math.max(1, math.ceil(#m.msg / MAXLEN))
-                logical, chunks, bytes = logical + 1, chunks + c, bytes + #m.msg + c * OVERHEAD
+                local len = m.msg and #m.msg or 0
+                local c = m.msg and math.max(1, math.ceil(len / MAXLEN)) or 0
+                logical, chunks, bytes = logical + 1, chunks + c, bytes + len + c * OVERHEAD
             end
         end
         local parts = {}; for k, v in pairs(byCmd) do parts[#parts + 1] = k .. ":" .. v end; table.sort(parts)
