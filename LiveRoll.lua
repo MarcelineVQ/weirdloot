@@ -588,7 +588,10 @@ local function applyInterestButtonAvailability(self, f, roll)
     local playerName = util:GetPlayerName("player")
     local allowed = isPlayerAllowedForRoll(self, roll, playerName)
     local blockReason = self:RollSelfBlockReason(roll.itemId)
-    local hasPrio = self:ItemHasPriority(roll and roll.name)
+    -- ML authority: BiS availability follows the prio the ML broadcast (roll.prio), not this client's
+    -- own list, so a raider with a different or stale prio table can't enable a BiS the ML did not
+    -- grant. A no-prio item syncs as DEFAULT_PRIO; any other string means it has a listed priority.
+    local hasPrio = roll.prio ~= nil and roll.prio ~= "" and roll.prio ~= DEFAULT_PRIO
     -- shared policy: a roll popup is always an open (never locked) lot
     local avail = util:RollTierAvailability(roll.itemId, allowed, false, blockReason, hasPrio)
 

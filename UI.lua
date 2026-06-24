@@ -1591,7 +1591,7 @@ function addon:BuildMasterTab()
     panel:SetAllPoints(self.ui.content)
     self.ui.panels.master = panel
 
-    panel.warning = createLabel(panel, "", "TOPLEFT", panel, "TOPLEFT", 8, -8)
+    panel.warning = createLabel(panel, "", "TOPLEFT", panel, "TOPLEFT", 12, 2)
     panel.warning:SetTextColor(1, 0.2, 0.2)
 
     -- Section header style matches the Options tab: gold-tinted large text with a thin gold
@@ -2721,7 +2721,7 @@ function addon:RefreshMasterTab()
         -- name-match can't confirm it. Only a reload recovers the roster.
         panel.warning:SetText("|cffff4040The raid roster failed to load, so loot-master controls are disabled. Please /reload to fix it.|r")
     else
-        panel.warning:SetText(authorized and "" or "Loot master controls are locked until you are the loot master or leadership fallback.")
+        panel.warning:SetText(authorized and "" or "You are not the current Loot Master. Controls are locked.")
     end
 
     if authorized then

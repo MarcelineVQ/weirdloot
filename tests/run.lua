@@ -13,7 +13,7 @@
 -- assert on (lootView.items / lootView.results) are built in Session, not UI.
 local ADDON_FILES = {
     "Libs/WeirdSync-1.0/WeirdSync-1.0.lua",
-    "TradeDeliver.lua", "Core.lua", "LootCore.lua", "Util.lua", "Config.lua",
+    "TradeDeliver.lua", "Core.lua", "LootPrios.lua", "LootCore.lua", "Util.lua", "Config.lua",
     "Roster.lua", "Session.lua", "Comm.lua", "Resolver.lua", "Payout.lua",
     "LiveRoll.lua", "AutoLoot.lua",
 }
@@ -1174,7 +1174,7 @@ test("eligible class: roll brackets stay enabled", function()
     local ml = makeWorld("Masterlooter", true)
     local raider = makeWorld("Raidertwo", false)
     raider.addon.IsPlayerAllowedForItem = function() return true end
-    raider.addon.ItemHasPriority = function() return true end   -- listed prio so BiS is offered too
+    ml.addon.GetLiveItemPrio = function() return "Warrior Fury" end   -- ML broadcasts a listed prio
     startSession(ml)
     setBag(ml, 40004, 1); bagUpdate(ml)
     local lot = openLot(ml, 40004)
@@ -1182,6 +1182,23 @@ test("eligible class: roll brackets stay enabled", function()
     flushWireTo(raider)
     local f = raider.addon.live.rolls[lot.id].popup
     check(f.bisBtn:IsEnabled() and f.msBtn:IsEnabled(), "brackets enabled for an item the class can use")
+end)
+
+test("ML authority: popup BiS follows the synced prio, not the raider's local list", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local raider = makeWorld("Raidertwo", false)
+    raider.addon.IsPlayerAllowedForItem = function() return true end
+    raider.addon.ItemHasPriority = function() return true end           -- raider's local list says "has prio"...
+    ml.addon.GetLiveItemPrio = function() return "MS > MU > OS > TM" end -- ...but the ML broadcasts no-prio
+    startSession(ml)
+    setBag(ml, 40004, 1); bagUpdate(ml)
+    local lot = openLot(ml, 40004)
+    ml.addon:StartLiveRoll(lot.id)
+    flushWireTo(raider)
+    local f = raider.addon.live.rolls[lot.id].popup
+    check(not f.bisBtn:IsEnabled(), "BiS disabled: the ML's no-prio broadcast wins over the raider's local list")
+    check(f.msBtn:IsEnabled(), "MS stays available")
 end)
 
 test("a raider requesting sync from a session-less ML gets no phantom session", function()
