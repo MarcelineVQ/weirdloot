@@ -159,13 +159,24 @@ local function makeWorld(playerName, isML)
     -- ---- bag + trade-window model (drives the real TradeDeliver engine) ----
     env.__bags = {}                                  -- [bag] = { size=N, [slot]={id,count,link} }
     for b = 0, 4 do env.__bags[b] = { size = 16 } end
+    -- equipped slots (gear 1..19, equipped bags 20..23) + keyring for the roll-block checks
+    env.NUM_BAG_SLOTS = 4
+    env.__equipped = {}                              -- [invSlot] = itemId
+    env.GetInventoryItemID = function(_, slot) return env.__equipped[slot] end
+    env.ContainerIDToInventoryID = function(bag) return 19 + bag end   -- bag1->20 .. bag4->23
+    env.KEYRING_CONTAINER = -2
+    env.__keyring = {}                               -- [slot] = itemId (reward keys live here)
+    env.GetKeyRingSize = function() return 12 end
     env.__cursor = nil                               -- item held on the cursor
     env.__tradePartner = nil                         -- UnitName("NPC")
     env.__tradeSlots = 0                             -- placed trade slots this window
     env.BIND_TRADE_TIME_REMAINING = "You may trade this item with %s for %s."
 
     env.GetContainerNumSlots = function(bag) local B = env.__bags[bag]; return B and B.size or 0 end
-    env.GetContainerItemID = function(bag, slot) local it = env.__bags[bag] and env.__bags[bag][slot]; return it and it.id or nil end
+    env.GetContainerItemID = function(bag, slot)
+        if bag == env.KEYRING_CONTAINER then return env.__keyring[slot] end
+        local it = env.__bags[bag] and env.__bags[bag][slot]; return it and it.id or nil
+    end
     env.GetContainerItemInfo = function(bag, slot)
         local it = env.__bags[bag] and env.__bags[bag][slot]
         if not it then return nil end
@@ -1522,6 +1533,67 @@ test("trade engine: Allow All Trades default ON lets a non-owed trade open durin
     fireEvent(w, "TRADE_SHOW")
     eq(w.env.__closeTrade, closesBefore, "non-owed trade is NOT auto-declined while allow-all is on")
     eq(owedCount(w), 1, "Alice still owed; the non-owed trade did not touch the ledger")
+end)
+
+-- ===========================================================================
+-- ROLL BLOCK: a pure-Unique item the player already holds (self-only, like the class block)
+-- ===========================================================================
+
+test("roll block: RollTierAvailability with a blockReason disables every bracket but Pass", function()
+    local w = makeWorld("Masterlooter", true)
+    local blocked = w.addon.util:RollTierAvailability(40005, true, false, "unique")
+    eq(blocked.pass, nil, "Pass stays available when self-blocked")
+    for _, k in ipairs({ "bis", "ms", "mu", "os", "tm" }) do
+        eq(blocked[k], "unique", k .. " bracket carries the block reason")
+    end
+    local quest = w.addon.util:RollTierAvailability(40005, true, false, "quest")
+    eq(quest.bis, "quest", "the reason string is passed through verbatim")
+    local open = w.addon.util:RollTierAvailability(40005, true, false, nil)
+    eq(open.bis, nil, "BiS is available when not self-blocked")
+end)
+
+test("roll block: PlayerHoldsItem sees bag contents, equipped gear, and equipped bags", function()
+    local w = makeWorld("Saelinen", false)
+    check(not w.addon:PlayerHoldsItem(40005), "not held to start")
+
+    putBag(w, 0, 1, 40005, 1)
+    check(w.addon:PlayerHoldsItem(40005), "found in a bag")
+
+    w.env.__bags[0][1] = nil
+    w.env.__equipped[11] = 40005                 -- a ring slot
+    check(w.addon:PlayerHoldsItem(40005), "found in equipped gear")
+
+    w.env.__equipped[11] = nil
+    w.env.__equipped[20] = 40004                 -- a Unique BAG equipped in the first bag slot
+    check(w.addon:PlayerHoldsItem(40004), "found as an equipped bag")
+end)
+
+test("roll block: OwnsBlockingUnique needs the item to be pure-Unique AND held", function()
+    local w = makeWorld("Saelinen", false)
+    w.addon.IsItemPureUnique = function(_, id) return id == 40005 or id == 40001 end
+    putBag(w, 0, 1, 40005, 1)                     -- pure-unique AND held
+    putBag(w, 0, 2, 40004, 1)                     -- held but not pure-unique
+    check(w.addon:OwnsBlockingUnique(40005), "held pure-unique is blocked")
+    check(not w.addon:OwnsBlockingUnique(40004), "held non-unique is not blocked")
+    check(not w.addon:OwnsBlockingUnique(40001), "pure-unique not held is not blocked")
+end)
+
+test("roll block: PlayerHoldsItem also scans the keyring (quest-reward keys live there)", function()
+    local w = makeWorld("Saelinen", false)
+    check(not w.addon:PlayerHoldsItem(44582), "reward key not held initially")
+    w.env.__keyring[3] = 44582                    -- the normal Focusing Iris reward key, in the keyring
+    check(w.addon:PlayerHoldsItem(44582), "found in the keyring")
+end)
+
+test("roll block: a dropped quest-starter is blocked once you hold the quest's reward (quest done)", function()
+    local w = makeWorld("Saelinen", false)
+    -- 44569 (the dropped normal key) starts a quest whose reward is the keyring key 44582.
+    eq(w.addon:RollSelfBlockReason(44569), nil, "not blocked before the quest is done")
+    w.env.__keyring[1] = 44582                    -- completed the quest -> hold the reward
+    eq(w.addon:RollSelfBlockReason(44569), "quest", "holding the reward blocks rolling the drop")
+    eq(w.addon:RollSelfBlockReason(44577), nil, "heroic drop unaffected by the normal reward")
+    w.env.__keyring[2] = 44581                    -- heroic reward
+    eq(w.addon:RollSelfBlockReason(44577), "quest", "heroic drop blocked by the heroic reward")
 end)
 
 -- ===========================================================================

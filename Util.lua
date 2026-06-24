@@ -417,18 +417,23 @@ end
 local ROLL_TIERS = { "bis", "ms", "mu", "os", "tm", "pass" }
 local NONEQUIP_TIERS = { ms = true, os = true, pass = true }   -- reduced-roll items get MS/OS(greed)/Pass
 
--- Single source of truth for which roll tiers an item offers, so the roll popup and the loot tab
--- (mirrors of each other) never drift. They differ only in how they render the result. Returns a map
--- tier -> disable reason ("locked" / "type" / "class") or nil when the tier is available.
-function util:RollTierAvailability(item, isAllowed, isLocked)
+-- Single source of truth for which roll brackets (BiS/MS/MU/OS/TM/Pass) an item offers, so the roll
+-- popup and the loot tab (mirrors of each other) never drift. They differ only in how they render the
+-- result. Returns a map bracket -> disable reason ("locked" / "quest" / "unique" / "type" / "class")
+-- or nil when the bracket is available. blockReason: a self-only reason the local player can't use
+-- this drop at all (already did the quest / already hold the unique), so only Pass is allowed. Self-
+-- only, like the class block; the ML cannot see others' bags.
+function util:RollTierAvailability(item, isAllowed, isLocked, blockReason)
     local reduced = self:IsKnownNonEquipment(item)
     local out = {}
     for _, key in ipairs(ROLL_TIERS) do
         local reason
         if isLocked then
-            reason = "locked"                              -- a locked (rolled-out) lot disables every tier
+            reason = "locked"                              -- a locked (rolled-out) lot disables every bracket
         elseif key == "pass" then
             reason = nil                                   -- pass is always available on an open lot
+        elseif blockReason then
+            reason = blockReason                           -- self-block (quest done / own the unique); only Pass remains
         elseif reduced then
             -- reduced-roll item (bag/mount/etc.): MS/OS/Pass only, and no class restriction applies
             reason = (not NONEQUIP_TIERS[key]) and "type" or nil
