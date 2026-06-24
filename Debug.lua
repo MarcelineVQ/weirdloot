@@ -132,7 +132,7 @@ function addon:HandleDebugCommand(rest)
     if verb == "" then
         self:Print("Core debug trace (off by default; turn it on once and the setting persists). Commands:")
         self:Print("  on / off: start or stop tracing.   status: state and record count.")
-        self:Print("  mark <label>: insert a marker for easier log chasing.   dump: show recent records.   clear: wipe it.")
+        self:Print("  mark <label>: insert a marker for easier log chasing.   dump [n]: show last n records (default 12).   clear: wipe it.")
         self:Print("  sync: force a session sync.   drop <n>: (test) drop the next N sync sends.")
     elseif verb == "status" then
         local drop = self._syncDropCount or 0
@@ -163,7 +163,7 @@ function addon:HandleDebugCommand(rest)
         self:Print("Forced a session sync request.")
     elseif verb == "dump" then
         local r = log.records
-        local n = math.min(#r, 12)
+        local n = math.min(#r, tonumber(arg) or 12)
         self:Print(string.format("Last %d of %d record(s):", n, #r))
         for i = #r - n + 1, #r do
             local rec = r[i]

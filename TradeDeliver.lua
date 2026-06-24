@@ -102,6 +102,28 @@ TradeDeliver._version = MINOR
 
 local MAX_SLOTS = MAX_TRADABLE_ITEMS or 6
 
+-- Whole-trade failure messages the server emits via UI_INFO_MESSAGE when an accept is rejected,
+-- mapped to a plain-language cause for the payout summary. We note the most recent one during an open
+-- window so an item that was placed but pulled back out (the ML removing a rejected item and re-
+-- accepting the rest) is reported with WHY it didn't go.
+--
+-- Both unique-count messages map to the same cause on purpose: on this client the pair is emitted
+-- BACKWARDS (handing over a unique the recipient already owns shows the giver "You have too many..."
+-- and the recipient "Your trade partner has too many..."), so we can't trust which side a message
+-- names. We key off either and report a single, direction-agnostic reason rather than echo the
+-- client's (here misleading) text. Fallback strings keep the set populated if a client build is
+-- missing a constant at load.
+-- Each cause carries two phrasings: `ml` for the loot master's local summary and `them` (second
+-- person), read as the tail of the recipient whisper "Trade failed, <them>: [items]".
+local UNIQUE_CAUSE = { ml = "recipient can't hold another of a unique item", them = "you already hold one (or more) unique" }
+local TRADE_FAIL_REASON = {
+    [ERR_TRADE_TARGET_MAX_COUNT_EXCEEDED or "Your trade partner has too many of a unique item."] = UNIQUE_CAUSE,
+    [ERR_TRADE_MAX_COUNT_EXCEEDED or "You have too many of a unique item."] = UNIQUE_CAUSE,
+    [ERR_TRADE_TARGET_BAG_FULL or "Trade failed, target doesn't have enough space."] = { ml = "recipient's bags are full", them = "your bags are full" },
+    [ERR_TRADE_BAG_FULL or "Trade failed, you don't have enough space."] = { ml = "your bags are full", them = "my bags are full" },
+    [ERR_TRADE_TARGET_DEAD or "You can't trade with dead players."] = { ml = "recipient is dead", them = "you were dead" },
+}
+
 -- ---------------------------------------------------------------------------
 -- shared "do this in N seconds" scheduler (no C_Timer on 3.3.5a)
 -- ---------------------------------------------------------------------------
@@ -140,6 +162,24 @@ local function listOwed(entry, maxLen)
     end
     local s = table.concat(parts, ", ")
     local extra = #entry.items - shown
+    if extra > 0 then s = s .. (", +%d more"):format(extra) end
+    return s
+end
+
+-- same link-list capping for a list of held-back items ({ {it=, qty=}, ... }); capped tighter than
+-- listOwed because the whisper wraps it in a sentence. Names every item that fits, then "+N more".
+local function listHeldBack(items, maxLen)
+    maxLen = maxLen or 150
+    local parts, used, shown = {}, 0, 0
+    for _, u in ipairs(items) do
+        local label = ((u.qty or 1) > 1 and (u.qty .. "x ") or "") .. itemDisplay(u.it)
+        if shown > 0 and used + #label + 2 > maxLen then break end
+        parts[#parts + 1] = label
+        used = used + #label + 2
+        shown = shown + 1
+    end
+    local s = table.concat(parts, ", ")
+    local extra = #items - shown
     if extra > 0 then s = s .. (", +%d more"):format(extra) end
     return s
 end
@@ -197,6 +237,27 @@ local function tradeWindowSeconds(bag, slot)
         end
     end
     return nil
+end
+
+-- Is `link` a PURE Unique item -- the "carry only one" limit that triggers the trade rejection we
+-- report? That is distinct from Unique-Equipped (only one EQUIPPED, but you may carry several, which
+-- never triggers it) and from the counted Unique (%d) forms. 3.3.5a exposes none of this via
+-- GetItemInfo, so we scan the item's tooltip for a BARE ITEM_UNIQUE line, rejecting the -Equipped and
+-- counted variants. Used to narrow which held-back item could actually be the dupe.
+local UNIQUE_LINE = ITEM_UNIQUE or "Unique"
+local UNIQUE_EQUIP_LINE = ITEM_UNIQUE_EQUIPPABLE or "Unique-Equipped"
+local function isPureUnique(link)
+    if not link then return false end
+    local tip = scanner()
+    tip:ClearLines()
+    tip:SetHyperlink(link)
+    for i = 2, tip:NumLines() do
+        local fs = _G["TradeDeliverScanTipTextLeft" .. i]
+        local txt = fs and fs:GetText()
+        if txt == UNIQUE_EQUIP_LINE then return false end   -- unique-equipped: not our rejection
+        if txt == UNIQUE_LINE then return true end          -- bare "Unique": carry-one
+    end
+    return false
 end
 
 -- snapshot every bag stack of itemID up front, with stack size and trade-window
@@ -354,7 +415,8 @@ function TradeDeliver:New(config)
     e.frame:RegisterEvent("TRADE_CLOSED")
     e.frame:RegisterEvent("TRADE_ACCEPT_UPDATE")
     e.frame:RegisterEvent("BAG_UPDATE")
-    e.frame:RegisterEvent("UI_INFO_MESSAGE")
+    e.frame:RegisterEvent("UI_INFO_MESSAGE")    -- carries the yellow "Trade complete." info message
+    e.frame:RegisterEvent("UI_ERROR_MESSAGE")   -- carries the red trade-rejection errors (unique/bags/dead)
     -- TRADE_CLOSED is watched ONLY to flip the tradeOpen flag. It must NOT touch `pending`,
     -- which a successful trade still needs in _onTradeComplete (TRADE_CLOSED fires around the
     -- same time as ERR_TRADE_COMPLETE); `pending` is cleared fresh on each TRADE_SHOW instead.
@@ -362,21 +424,40 @@ function TradeDeliver:New(config)
         if event == "TRADE_SHOW" then
             e.tradeOpen = true
             e.placedSnapshot = nil      -- fresh per trade
+            e.lastTradeError = nil      -- fresh per trade
+            e:_trace("SHOW")
             e:_onTradeShow()
         elseif event == "TRADE_CLOSED" then
             e.tradeOpen = false
+            e:_trace(("CLOSED pending=%s err=%s"):format(e.pending and "Y" or "N", e.lastTradeError and "Y" or "N"))
+            e:_onTradeClosed()
         elseif event == "TRADE_ACCEPT_UPDATE" then
-            -- both sides accepted: capture what WE placed before the window clears, so a manual
-            -- hand-trade (not auto-filled) can still be reconciled against the owed ledger.
+            -- both sides accepted: capture what WE placed before the window clears. This is the
+            -- agreed transfer the trade settles against (auto-fill AND manual hand-trade), so an
+            -- item the ML pulled back out before re-accepting is never miscredited as delivered.
+            e:_trace(("ACCEPT a1=%s a2=%s"):format(tostring(arg1), tostring(arg2)))
             if arg1 == 1 and arg2 == 1 then e:_snapshotPlacedItems() end
         elseif event == "BAG_UPDATE" then
             e:_onBagUpdate(arg1)
-        elseif event == "UI_INFO_MESSAGE" and arg1 == ERR_TRADE_COMPLETE then
-            e:_onTradeComplete()
+        elseif event == "UI_INFO_MESSAGE" then
+            if arg1 == ERR_TRADE_COMPLETE then        -- the yellow "Trade complete." info line
+                e:_trace("UIINFO complete")
+                e:_onTradeComplete()
+            end
+        elseif event == "UI_ERROR_MESSAGE" then
+            -- Trade rejections are RED error messages, not info. They can land just AFTER TRADE_CLOSED,
+            -- so capture ungated: _noteTradeError is content-filtered (only known trade-failure strings
+            -- match), which can't false-positive on the many unrelated UI_ERROR_MESSAGE lines.
+            if e.pending or e.tradeOpen then e:_trace("UIERR [" .. tostring(arg1) .. "]") end
+            e:_noteTradeError(arg1)
         end
     end)
     return e
 end
+
+-- compact event trace; a no-op unless `/wl debug on`. Lets one real trade reveal the exact event
+-- order + raw rejection text, so the failure handling is matched to the client, not guessed.
+function Engine:_trace(what) self._log("td-ev", { id = what }) end
 
 -- ---- throttled comms ----------------------------------------------------
 function Engine:_whisper(target, text)
@@ -717,6 +798,7 @@ function Engine:_snapshotPlacedItems()
         end
     end
     self.placedSnapshot = { partner = partner, items = items }
+    self:_trace(("SNAPSHOT partner=%s n=%d"):format(tostring(partner), #items))
 end
 
 -- A hand-trade the engine did not auto-fill: reconcile what we placed against the partner's owed
@@ -751,6 +833,42 @@ function Engine:_recordManualDelivery()
     if #entry.items == 0 then self.db.owed[key] = nil end
 end
 
+-- note a whole-trade rejection cause seen during an open window (e.g. the recipient already holds a
+-- unique we placed). Kept until the next TRADE_SHOW; attached to any placed-but-undelivered item.
+function Engine:_noteTradeError(msg)
+    local reason = msg and TRADE_FAIL_REASON[msg]
+    if reason then           -- trace/store only on a match; UI_ERROR_MESSAGE fires constantly otherwise
+        self.lastTradeError = reason
+        self:_trace("NOTE_ERR [" .. tostring(msg) .. "]")
+        self._dbg("trade error noted: " .. msg .. " -> " .. reason.ml)
+    end
+end
+
+-- Per-itemId counts of what was ACTUALLY in the trade window at accept time -- the agreed transfer.
+-- This is what a completed trade really moved, which can be LESS than what we placed if the ML pulled
+-- an item back out (a rejected unique) and re-accepted the rest. Falls back to the placed plan only
+-- if no accept snapshot was captured, so a missed TRADE_ACCEPT_UPDATE never loses a real delivery.
+function Engine:_deliveredCounts(p)
+    local snap = self.placedSnapshot
+    local counts = {}
+    if snap and snap.items and (not snap.partner or snap.partner:lower() == p.key) then
+        for _, it in ipairs(snap.items) do
+            counts[it.id] = (counts[it.id] or 0) + (it.count or 1)
+        end
+        return counts
+    end
+    for _, pl in ipairs(p.placed) do          -- no usable snapshot: trust the placement (legacy)
+        counts[pl.it.id] = (counts[pl.it.id] or 0) + pl.qty
+    end
+    return counts
+end
+
+-- Could this held-back item be the dupe that triggered a unique rejection? Only PURE Unique items can.
+-- Split out as a method so the cause-narrowing is testable without a live tooltip.
+function Engine:_isPureUnique(it)
+    return isPureUnique(it and it.link)
+end
+
 function Engine:_onTradeComplete()
     local p = self.pending
     self.pending = nil
@@ -762,20 +880,113 @@ function Engine:_onTradeComplete()
     end
     local entry = self.db.owed[p.key]
     if not entry then return end
-    local total = 0
+
+    -- Settle against what the window actually held at accept time, not what we placed. If the ML
+    -- removed an item before re-accepting (a unique the recipient already has rejects the whole
+    -- trade), crediting p.placed would mark a never-delivered item delivered and drop its owe.
+    -- Credit each placed item only up to the amount the snapshot confirms moved; the rest stays owed.
+    local delivered = self:_deliveredCounts(p)
+    local total, undelivered = 0, {}
     for _, pl in ipairs(p.placed) do
-        pl.it.count = (pl.it.count or 1) - pl.qty
-        total = total + pl.qty
-        -- report each delivered copy so the loot core can record where it went
-        self._onDelivered(entry.name, pl.it.id, pl.qty)
+        local avail = delivered[pl.it.id] or 0
+        local credit = math.min(pl.qty, avail)
+        if credit > 0 then
+            delivered[pl.it.id] = avail - credit
+            pl.it.count = (pl.it.count or 1) - credit
+            total = total + credit
+            self._onDelivered(entry.name, pl.it.id, credit)   -- core records where it went
+        end
+        if credit < pl.qty then
+            undelivered[#undelivered + 1] = { it = pl.it, qty = pl.qty - credit }
+        end
     end
     for i = #entry.items, 1, -1 do
         if (entry.items[i].count or 0) <= 0 then table.remove(entry.items, i) end
     end
-    self._print(("delivered %d item(s) to %s; %d entry(ies) still owed"):format(total, entry.name, #entry.items))
+
+    self:_finishReport(entry, p.key, total, undelivered)
+end
+
+-- Report a finished trade's outcome and tidy the ledger. `undelivered` is the list of {it, qty} that
+-- did NOT transfer (empty on a clean trade; everything placed on an aborted one). Shared by the
+-- completion path (partial deliveries) and the abort path (a rejection that closed the window).
+function Engine:_finishReport(entry, key, total, undelivered)
+    -- informed: we have already whispered the recipient WHY an item was held back, so skip the generic
+    -- "open another trade" nudge below (re-opening can't fix a rejection -- it would just fail again).
+    local informed = false
+    if #undelivered > 0 then
+        local parts = {}
+        for _, u in ipairs(undelivered) do parts[#parts + 1] = u.qty .. "x " .. itemDisplay(u.it) end
+        local list = table.concat(parts, ", ")
+        local cause = self.lastTradeError
+
+        if not cause then
+            -- held back with no captured cause (e.g. the ML pulled an item by hand): just report the fact.
+            self._print(("delivered %d to %s; %d still owed, not traded: %s"):format(
+                total, entry.name, #entry.items, list))
+        else
+            -- attribute the failure. Only the unique ("has too many") case names items, as a hint at
+            -- WHICH unique the recipient already holds -- and only PURE Unique ones can be the dupe
+            -- (Unique-Equipped never trips it). Trade-wide causes (bags full / dead) apply to the whole
+            -- trade, so naming items adds nothing; just state the reason.
+            local whisperText
+            if cause == UNIQUE_CAUSE then
+                local candidates = {}
+                for _, u in ipairs(undelivered) do
+                    if self:_isPureUnique(u.it) then candidates[#candidates + 1] = u end
+                end
+                local pool = (#candidates > 0) and candidates or undelivered
+                whisperText = ("Trade failed, %s: %s"):format(cause.them, listHeldBack(pool))
+            else
+                whisperText = "Trade failed, " .. cause.them
+            end
+            self._print(("delivered %d to %s; %d still owed, not traded: %s (%s)"):format(
+                total, entry.name, #entry.items, list, cause.ml))
+            self:_whisper(entry.name, whisperText)
+            informed = true
+        end
+    else
+        self._print(("delivered %d item(s) to %s; %d entry(ies) still owed"):format(total, entry.name, #entry.items))
+    end
+
     if #entry.items == 0 then
-        self.db.owed[p.key] = nil
-    elseif self.payoutActive then
+        self.db.owed[key] = nil
+    elseif self.payoutActive and not informed then
         self:_whisper(entry.name, "Still owed: " .. listOwed(entry) .. " - open another trade with me.")
     end
+end
+
+-- A trade window closed. If an auto-fill is still pending AND we captured a failure cause, the trade
+-- was rejected and never completed (a successful trade clears `pending` in _onTradeComplete first),
+-- so ERR_TRADE_COMPLETE will never fire to report it. Confirm after a short delay -- TRADE_CLOSED can
+-- edge out ERR_TRADE_COMPLETE on a success -- then report the aborted trade so a unique/bag rejection
+-- that closes the window still informs the ML and recipient instead of failing silently. A plain
+-- cancel (no captured cause) stays silent.
+-- Arm a deferred decision whenever a trade closes with an auto-fill still pending. We do NOT require
+-- the failure cause to be known yet: the rejection error is a RED UI_ERROR_MESSAGE that can land just
+-- after TRADE_CLOSED, so we wait a beat for it. After the delay: a completion will have cleared
+-- `pending` (defused); a captured cause means a real rejection (report + inform); neither means a
+-- plain cancel (clear quietly, no noise).
+function Engine:_onTradeClosed()
+    local p = self.pending
+    if not p then return end
+    self:_trace("ABORT-armed")
+    after(0.5, function()
+        if self.pending ~= p then self:_trace("ABORT-defused"); return end   -- a completion beat us
+        self.pending = nil
+        if self.lastTradeError then self:_onTradeAborted(p)
+        else self:_trace("ABORT-cancel") end                                 -- plain cancel: stay quiet
+    end)
+end
+
+-- An auto-filled trade closed on a rejection without completing: nothing transferred, so everything we
+-- placed is still owed. Report it (and inform the recipient) via the same path as a partial completion.
+function Engine:_onTradeAborted(p)
+    local entry = self.db.owed[p.key]
+    if not entry then return end
+    self:_trace("ABORT-fired")
+    self._log("td-abort", { key = p.key, cause = self.lastTradeError and self.lastTradeError.ml or nil })
+    local undelivered = {}
+    for _, pl in ipairs(p.placed) do undelivered[#undelivered + 1] = { it = pl.it, qty = pl.qty } end
+    self:_finishReport(entry, p.key, 0, undelivered)
 end

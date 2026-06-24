@@ -133,6 +133,11 @@ local function makeWorld(playerName, isML)
     env.ITEM_SOULBOUND = "Soulbound"
     env.ITEM_BIND_ON_EQUIP = "Binds when equipped"
     env.ERR_TRADE_COMPLETE = "Trade complete."
+    -- This client emits the unique-count pair backwards: the GIVER (the ML running the addon) sees
+    -- ERR_TRADE_MAX_COUNT_EXCEEDED even though it's the recipient who holds the dupe.
+    env.ERR_TRADE_MAX_COUNT_EXCEEDED = "You have too many of a unique item."
+    env.ERR_TRADE_TARGET_MAX_COUNT_EXCEEDED = "Your trade partner has too many of a unique item."
+    env.ERR_TRADE_TARGET_BAG_FULL = "Trade failed, target doesn't have enough space."
     env.UI_INFO_MESSAGE = "UI_INFO_MESSAGE"
     env.MAX_TRADABLE_ITEMS = 6
     env.CloseTrade = function() env.__closeTrade = env.__closeTrade + 1 end
@@ -1231,6 +1236,232 @@ test("trade engine: short stock delivers what it can, rest stays owed", function
     w.addon.payout:StartPayout()
     runTrade(w, "Alice")
     eq(owedCount(w), 1, "1 of 2 delivered; 1 still owed")
+end)
+
+test("trade engine: ML pulls a rejected unique before re-accepting; only traded items settle", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    for i = 1, 4 do
+        w.addon.payout:Owe("Alice", 41000 + i, 1, linkFor(41000 + i))
+        putBag(w, 0, i, 41000 + i, 1)
+    end
+    eq(owedCount(w), 4, "Alice owed 4 up front")
+
+    -- spy the one back-channel into the core: a traded item must be reported delivered; a pulled one
+    -- must NOT (a wrongly-reported delivery would flip the core award to the DELIVERED terminal).
+    local marked = {}
+    local core = w.addon.lootCore
+    local orig = core.MarkDeliveredFor
+    core.MarkDeliveredFor = function(self, player, itemId, when) marked[itemId] = true; return orig(self, player, itemId, when) end
+
+    -- capture whispers so we can assert the recipient is told WHY their item was held back
+    local whispers = {}
+    w.env.ChatThrottleLib.SendChatMessage = function(_, _, _, text, chatType, _, target)
+        if chatType == "WHISPER" then whispers[#whispers + 1] = { text = text, target = target } end
+    end
+
+    w.addon.payout:StartPayout()
+
+    -- auto-fill stuffs all 4 owed items into the window
+    setPartner(w, "Alice")
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)
+
+    -- first accept with all 4: Alice already holds the unique 41003, so the whole trade is rejected.
+    -- The window still holds 4 at this point. The ML's client emits the giver-side message (which on
+    -- this client is the "You have too many" one, emitted backwards) -- we must key off that too.
+    w.env.__tradePlaced = { { id = 41001 }, { id = 41002 }, { id = 41003 }, { id = 41004 } }
+    fireEvent(w, "TRADE_ACCEPT_UPDATE", 1, 1)
+    fireEvent(w, "UI_ERROR_MESSAGE", w.env.ERR_TRADE_MAX_COUNT_EXCEEDED)   -- red error, not info
+
+    -- ML pulls the unique out and re-accepts; only 3 are now in the window, and the trade completes.
+    w.env.__tradePlaced = { { id = 41001 }, { id = 41002 }, { id = 41004 } }
+    fireEvent(w, "TRADE_ACCEPT_UPDATE", 1, 1)
+    fireEvent(w, "UI_INFO_MESSAGE", w.env.ERR_TRADE_COMPLETE)
+
+    eq(owedCount(w), 1, "3 traded, 1 still owed (not 0)")
+    local entry = w.addon.payout:GetOwed("Alice")
+    eq(entry and #entry.items, 1, "exactly one item remains owed")
+    eq(entry and entry.items[1].id, 41003, "the pulled unique is what stays owed")
+    check(marked[41001] and marked[41002] and marked[41004], "the 3 traded items were reported delivered to the core")
+    check(not marked[41003], "the pulled unique was NEVER reported delivered to the core")
+    eq(w.addon.payout.lastTradeError and w.addon.payout.lastTradeError.ml,
+        "recipient can't hold another of a unique item",
+        "giver-side message normalized to a direction-agnostic cause")
+
+    -- the one held-back item is provably the culprit, so the recipient is told which item and why
+    local told = false
+    for _, m in ipairs(whispers) do
+        if m.target == "Alice" and m.text:find("Trade failed, you already hold one (or more) unique", 1, true)
+           and m.text:find("Item41003", 1, true) then told = true end
+    end
+    check(told, "recipient whispered the specific item link + recipient-facing reason")
+    -- ...and is NOT told to "open another trade" (re-opening can't fix a unique rejection)
+    local nagged = false
+    for _, m in ipairs(whispers) do
+        if m.target == "Alice" and m.text:find("open another trade", 1, true) then nagged = true end
+    end
+    check(not nagged, "no futile re-open nudge after a rejection")
+end)
+
+test("trade engine: several uniques held back -- names each PURE-unique candidate, excludes unique-equipped", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    for i = 1, 4 do
+        w.addon.payout:Owe("Alice", 41000 + i, 1, linkFor(41000 + i))
+        putBag(w, 0, i, 41000 + i, 1)
+    end
+
+    -- 41002 & 41003 are pure Unique (possible culprits); 41004 is Unique-Equipped, which can NEVER trip
+    -- the carry-one rejection, so it must be excluded from the candidates we name to the raider.
+    w.addon.payout._isPureUnique = function(_, it) return it.id == 41002 or it.id == 41003 end
+
+    local marked = {}
+    local core = w.addon.lootCore
+    local orig = core.MarkDeliveredFor
+    core.MarkDeliveredFor = function(self, player, itemId, when) marked[itemId] = true; return orig(self, player, itemId, when) end
+
+    local whispers = {}
+    w.env.ChatThrottleLib.SendChatMessage = function(_, _, _, text, chatType, _, target)
+        if chatType == "WHISPER" then whispers[#whispers + 1] = { text = text, target = target } end
+    end
+
+    w.addon.payout:StartPayout()
+    setPartner(w, "Alice")
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)
+
+    -- first accept of all 4 is rejected (Alice holds the two uniques already); window still shows 4
+    w.env.__tradePlaced = { { id = 41001 }, { id = 41002 }, { id = 41003 }, { id = 41004 } }
+    fireEvent(w, "TRADE_ACCEPT_UPDATE", 1, 1)
+    fireEvent(w, "UI_ERROR_MESSAGE", w.env.ERR_TRADE_MAX_COUNT_EXCEEDED)   -- red error, not info
+
+    -- ML pulls all three problem items; only 41001 transfers and the trade completes
+    w.env.__tradePlaced = { { id = 41001 } }
+    fireEvent(w, "TRADE_ACCEPT_UPDATE", 1, 1)
+    fireEvent(w, "UI_INFO_MESSAGE", w.env.ERR_TRADE_COMPLETE)
+
+    eq(owedCount(w), 3, "all three held-back items stay owed")
+    check(marked[41001] and not marked[41002] and not marked[41003] and not marked[41004],
+        "only the one transferred item was reported delivered")
+
+    local reasonWhisper
+    for _, m in ipairs(whispers) do
+        if m.target == "Alice" and m.text:find("you already hold one (or more) unique", 1, true) then reasonWhisper = m.text end
+    end
+    check(reasonWhisper ~= nil, "recipient whispered the unique-collision candidates")
+    check(reasonWhisper and reasonWhisper:find("Item41002", 1, true), "names pure-unique 41002")
+    check(reasonWhisper and reasonWhisper:find("Item41003", 1, true), "names pure-unique 41003")
+    check(reasonWhisper and not reasonWhisper:find("Item41004", 1, true), "excludes unique-equipped 41004 from the candidates")
+end)
+
+test("trade engine: a unique rejection that CLOSES the trade (no complete) still informs, not silent", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    for i = 1, 3 do
+        w.addon.payout:Owe("Alice", 41000 + i, 1, linkFor(41000 + i))
+        putBag(w, 0, i, 41000 + i, 1)
+    end
+    w.addon.payout._isPureUnique = function(_, it) return it.id == 41002 end
+
+    local marked, whispers = {}, {}
+    local core = w.addon.lootCore
+    local orig = core.MarkDeliveredFor
+    core.MarkDeliveredFor = function(self, player, itemId, when) marked[itemId] = true; return orig(self, player, itemId, when) end
+    w.env.ChatThrottleLib.SendChatMessage = function(_, _, _, text, chatType, _, target)
+        if chatType == "WHISPER" then whispers[#whispers + 1] = { text = text, target = target } end
+    end
+
+    w.addon.payout:StartPayout()
+    setPartner(w, "Alice")
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)
+
+    -- both accept; the whole trade is rejected (Alice holds unique 41002) and the window CLOSES with
+    -- nothing delivered. No ERR_TRADE_COMPLETE ever fires -- the old code reported nothing here.
+    -- The red UI_ERROR_MESSAGE lands AFTER TRADE_CLOSED (the real in-game order per the captured log),
+    -- so the abort must arm on close and wait for the cause rather than require it up front.
+    w.env.__tradePlaced = { { id = 41001 }, { id = 41002 }, { id = 41003 } }
+    fireEvent(w, "TRADE_ACCEPT_UPDATE", 1, 1)
+    fireEvent(w, "TRADE_CLOSED")
+    fireEvent(w, "UI_ERROR_MESSAGE", w.env.ERR_TRADE_MAX_COUNT_EXCEEDED)   -- red error, arrives post-close
+    pump(w, 1.0)   -- drive the deferred abort-confirm timer
+
+    eq(owedCount(w), 3, "nothing delivered -> all three stay owed")
+    check(not marked[41001] and not marked[41002] and not marked[41003], "no deliveries reported to the core")
+    local told = false
+    for _, m in ipairs(whispers) do
+        if m.target == "Alice" and m.text:find("Trade failed, you already hold one (or more) unique", 1, true)
+           and m.text:find("Item41002", 1, true) then told = true end
+    end
+    check(told, "recipient told which unique blocked the trade even though it never completed")
+end)
+
+test("trade engine: a bag-full rejection states the reason but does NOT link items (links are a unique hint only)", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    for i = 1, 2 do
+        w.addon.payout:Owe("Alice", 41000 + i, 1, linkFor(41000 + i))
+        putBag(w, 0, i, 41000 + i, 1)
+    end
+
+    local whispers = {}
+    w.env.ChatThrottleLib.SendChatMessage = function(_, _, _, text, chatType, _, target)
+        if chatType == "WHISPER" then whispers[#whispers + 1] = { text = text, target = target } end
+    end
+
+    w.addon.payout:StartPayout()
+    setPartner(w, "Alice")
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)
+
+    -- the recipient's bags are full: a trade-wide failure that closes the window. Reason only, no items.
+    w.env.__tradePlaced = { { id = 41001 }, { id = 41002 } }
+    fireEvent(w, "TRADE_ACCEPT_UPDATE", 1, 1)
+    fireEvent(w, "TRADE_CLOSED")
+    fireEvent(w, "UI_ERROR_MESSAGE", w.env.ERR_TRADE_TARGET_BAG_FULL)
+    pump(w, 1.0)
+
+    eq(owedCount(w), 2, "nothing delivered -> both stay owed")
+    local reasonWhisper
+    for _, m in ipairs(whispers) do
+        if m.target == "Alice" and m.text:find("your bags are full", 1, true) then reasonWhisper = m.text end
+    end
+    check(reasonWhisper ~= nil, "recipient told the bag-full reason")
+    check(reasonWhisper and not reasonWhisper:find("Item4100", 1, true), "no item links on a trade-wide cause")
+end)
+
+test("trade engine: a plain cancel (no red error) stays silent -- no whisper, owe untouched", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon.payout:Owe("Alice", 40005, 1, linkFor(40005))
+    putBag(w, 0, 1, 40005, 1)
+
+    local whispers = {}
+    w.env.ChatThrottleLib.SendChatMessage = function(_, _, _, text, chatType, _, target)
+        if chatType == "WHISPER" then whispers[#whispers + 1] = { text = text, target = target } end
+    end
+
+    w.addon.payout:StartPayout()
+    setPartner(w, "Alice")
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)                                  -- auto-fill places the item (pending set)
+
+    -- either party just cancels: TRADE_CLOSED fires with nothing delivered and NO red error follows.
+    fireEvent(w, "TRADE_CLOSED")
+    pump(w, 1.0)                                  -- the 0.5s arm elapses with no cause captured
+
+    eq(owedCount(w), 1, "owe untouched by a bare cancel")
+    local nagged = false
+    for _, m in ipairs(whispers) do
+        if m.target == "Alice" and (m.text:find("Trade failed", 1, true) or m.text:find("not traded", 1, true)) then nagged = true end
+    end
+    check(not nagged, "no failure whisper on a plain cancel")
 end)
 
 test("trade engine: more than 6 owed items cap at one trade's 6 slots", function()
