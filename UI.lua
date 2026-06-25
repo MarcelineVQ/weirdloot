@@ -1415,6 +1415,17 @@ function addon:BuildResultsTab()
     panel:SetAllPoints(self.ui.content)
     self.ui.panels.results = panel
 
+    -- Clickable column headers above the list. Each click sets the sort mode and re-refreshes; same
+    -- pattern as the Loot tab's headers. Widths match the row columns below (icon+name = 290,
+    -- winner = 170) so the labels sit over the data they sort.
+    local nameHeader = createButton(panel, "Item Name", 290, 18)
+    nameHeader:SetPoint("TOPLEFT", panel, "TOPLEFT", 4, -4)
+    nameHeader:SetScript("OnClick", function() addon:SetResultsSortMode("name") end)
+
+    local winnerHeader = createButton(panel, "Who Won", 170, 18)
+    winnerHeader:SetPoint("LEFT", nameHeader, "RIGHT", 12, 0)
+    winnerHeader:SetScript("OnClick", function() addon:SetResultsSortMode("winner") end)
+
     -- 21 rows fills the full-height list (content is ~532px; 24px row pitch) instead of leaving the
     -- lower third of the panel as empty backdrop.
     local list = createScrollList(panel, "WeirdLootResultsList", 21, function(row)
@@ -1476,7 +1487,7 @@ function addon:BuildResultsTab()
             end
         end)
     end)
-    list:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, 0)
+    list:SetPoint("TOPLEFT", nameHeader, "BOTTOMLEFT", -4, -4)
     list:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 0, 0)
     list:SetWidth(520)
 
@@ -2665,8 +2676,46 @@ function addon:RefreshRaidersTab()
     end)
 end
 
+function addon:SetResultsSortMode(mode)
+    self.db.ui.resultsSortMode = mode or "default"
+    self:RefreshResultsTab()
+end
+
+-- Return a shallow copy of lootView.results sorted by the active mode. Stable on ties: the
+-- comparator falls back to the original index so two items with the same key keep their
+-- relative resolution order. Never mutates lootView.results itself.
+function addon:GetSortedResults()
+    local out = {}
+    for i, r in ipairs(self.lootView.results or {}) do
+        out[#out + 1] = { _idx = i, r = r }
+    end
+    local mode = (self.db.ui and self.db.ui.resultsSortMode) or "default"
+    local function winnerNameOf(r)
+        if r.winners and r.winners[1] then return r.winners[1] end
+        return r.winnersText or r.winner or ""
+    end
+    if mode == "name" then
+        table.sort(out, function(a, b)
+            local an = string.lower(a.r.itemName or "")
+            local bn = string.lower(b.r.itemName or "")
+            if an == bn then return a._idx < b._idx end
+            return an < bn
+        end)
+    elseif mode == "winner" then
+        table.sort(out, function(a, b)
+            local aw = string.lower(winnerNameOf(a.r))
+            local bw = string.lower(winnerNameOf(b.r))
+            if aw == bw then return a._idx < b._idx end
+            return aw < bw
+        end)
+    end
+    local flat = {}
+    for _, w in ipairs(out) do flat[#flat + 1] = w.r end
+    return flat
+end
+
 function addon:RefreshResultsTab()
-    local results = self.lootView.results or {}
+    local results = self:GetSortedResults()
     self.ui.resultsList.update(#results, function(row, index)
         local result = results[index]
         row.result = result
