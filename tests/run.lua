@@ -1233,6 +1233,91 @@ test("delta sync: a dropped delta is detected via rev gap and auto-resynced", fu
     eq(syncView(raider), syncView(ml), "raider converged to ML truth after gap + resync")
 end)
 
+test("resync retry defers (no nil-target whisper) while the loot master is unresolved, resumes when it returns", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local raider = makeWorld("Raidertwo", false)
+    startSession(ml)
+    ml.addon:BroadcastSession(); flushWireTo(raider)      -- baseline -> raider has lastRev + appliedEpoch
+    local ch = raider.addon.syncChannel
+
+    ch:RequestSync()                                      -- raider has an in-flight resync request
+    check(ch.pendingRequest ~= nil, "raider has a pending resync request")
+
+    -- The loot master goes offline / the raider leaves the raid: authorityName() no longer resolves.
+    -- Before the fix, Tick whispered this nil target and the client threw
+    -- "SendAddonMessage(): Whisper message missing target player!". Now it skips the send but HOLDS the
+    -- request (still under maxAttempts), so a transient outage doesn't drop the resync.
+    raider.addon.roster.lootMasterName = nil
+    clearWire()
+    ch:Tick(CLOCK + 1000)
+    ch:Tick(CLOCK + 2000)
+    for _, m in ipairs(WIRE) do
+        check(not (m.dist == "WHISPER" and m.target == nil), "no whisper queued with a nil target")
+    end
+    check(ch.pendingRequest ~= nil, "request held (deferring) while no authority resolves")
+
+    -- The ML returns: the very next retry resolves a target and whispers it (resume + retarget for free,
+    -- no dependency on a heartbeat). The target is read fresh each tick, never cached on the request.
+    raider.addon.roster.lootMasterName = "Masterlooter"
+    clearWire()
+    ch:Tick(CLOCK + 3000)
+    local whispered = false
+    for _, m in ipairs(WIRE) do
+        if m.dist == "WHISPER" and m.target == "Masterlooter" then whispered = true end
+    end
+    check(whispered, "retry resumes whispering the loot master once it resolves again")
+end)
+
+test("resync retry gives up on a bounded horizon when no authority ever resolves (no infinite poll)", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local raider = makeWorld("Raidertwo", false)
+    startSession(ml)
+    ml.addon:BroadcastSession(); flushWireTo(raider)
+    local ch = raider.addon.syncChannel
+
+    ch:RequestSync()
+    raider.addon.roster.lootMasterName = nil              -- authority never comes back
+    clearWire()
+    -- Drive many retries; each deferred tick still counts against maxAttempts, so it must stop.
+    for i = 1, 20 do
+        if not ch.pendingRequest then break end
+        ch:Tick(CLOCK + i * 1000)
+    end
+    eq(ch.pendingRequest, nil, "deferred retries are bounded by maxAttempts, not an infinite poll")
+    for _, m in ipairs(WIRE) do
+        check(not (m.dist == "WHISPER" and m.target == nil), "never whispered a nil target while deferring")
+    end
+
+    -- Bounded give-up is not terminal: a heartbeat from the returned ML re-arms the resync.
+    raider.addon.roster.lootMasterName = "Masterlooter"
+    ch:OnReceive("Masterlooter", { "H", ml.addon:GetCurrentSession().id, tostring((ch.lastRev or 0) + 5) })
+    check(ch.pendingRequest ~= nil, "a heartbeat re-arms the resync after a bounded give-up")
+end)
+
+test("resync retry still fires normally while the loot master is present", function()
+    clearWire()
+    local ml = makeWorld("Masterlooter", true)
+    local raider = makeWorld("Raidertwo", false)
+    startSession(ml)
+    ml.addon:BroadcastSession(); flushWireTo(raider)
+    local ch = raider.addon.syncChannel
+
+    ch:RequestSync()
+    local firstAttempts = ch.pendingRequest.attempts
+    clearWire()
+    ch:Tick(CLOCK + 1000)                                 -- ML still in the raid: retry must proceed
+
+    eq(ch.pendingRequest ~= nil, true, "request stays in flight while the authority is present")
+    check(ch.pendingRequest.attempts > firstAttempts, "retry counted (resend happened, not a give-up)")
+    local whispered = false
+    for _, m in ipairs(WIRE) do
+        if m.dist == "WHISPER" and m.target == "Masterlooter" then whispered = true end
+    end
+    check(whispered, "retry whispered the resolved loot master")
+end)
+
 -- ===========================================================================
 -- TRADE ENGINE (drives the real TradeDeliver fill/complete machinery)
 -- ===========================================================================

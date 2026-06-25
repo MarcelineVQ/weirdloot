@@ -331,9 +331,16 @@ function Channel:Tick(t)
         else
             pr.attempts = pr.attempts + 1
             local auth = self.cb.authorityName()
-            self:_send({ "RQ", self.me, pr.reqId }, "WHISPER", auth, "NORMAL")
+            if auth and auth ~= "" then
+                self:_send({ "RQ", self.me, pr.reqId }, "WHISPER", auth, "NORMAL")
+                self.cb.log("resend", { kind = "request", reqId = pr.reqId, attempt = pr.attempts })
+            else
+                -- No authority resolves this tick: skip the whisper (a nil/empty target throws "missing
+                -- target player"). The attempt still counts, so retries stay bounded by maxAttempts; a
+                -- later tick resends if an authority resolves in time (target is read fresh, not cached).
+                self.cb.log("defer", { kind = "request", reqId = pr.reqId, attempt = pr.attempts })
+            end
             pr.nextAttempt = t + self:_backoff(pr.attempts)
-            self.cb.log("resend", { kind = "request", reqId = pr.reqId, attempt = pr.attempts })
         end
     end
 end
