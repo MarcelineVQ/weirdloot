@@ -26,7 +26,7 @@ addon.prefix = "WeirdLoot"
 -- Future versions should simply pull the version from the .toc via
 -- GetAddOnMetadata("WeirdLoot", "Version"), but since we're iterating frequently
 -- this should show live, so a .lua file based version is correct.
-addon.version = "1.1.2"
+addon.version = "1.1.3"
 addon.callbacks = {}
 addon.events = CreateFrame("Frame")
 

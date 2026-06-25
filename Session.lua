@@ -303,6 +303,7 @@ end
 function addon:BuildTradeableEpicCounts()
     local counts = {}
     local soonest                        -- soonest trade-window expiry (s) among counted windowed items
+    local loading = false                -- a slot whose item data has not arrived yet (cold cache)
     local testMode = self.db and self.db.testMode
     local minQuality = testMode and 0 or 4
     local tooltip = getTradeScanTooltip()
@@ -312,6 +313,12 @@ function addon:BuildTradeableEpicCounts()
         for slot = 1, slots do
             local link = GetContainerItemLink(bag, slot)
             local count, quality = getBagItemCountAndQuality(bag, slot, link)
+            -- Cold cache: a freshly-looted item can sit in the bag before its template data (quality,
+            -- name) has arrived from the server. GetItemInfo is nil until then, so the eligibility test
+            -- below cannot classify it and it would not surface until the next loot or the 60s reconcile.
+            -- The call also nudges the client to fetch it; OnBagUpdate re-scans shortly (see loading).
+            local itemId = GetContainerItemID(bag, slot)
+            if itemId and not GetItemInfo(itemId) then loading = true end
             if testMode and link and count > 0 and quality and quality >= minQuality then
                 -- city testing: any bag item is eligible EXCEPT soulbound ones (those
                 -- can't be traded). A trade-window item is soulbound but tradeable, so
@@ -370,6 +377,7 @@ function addon:BuildTradeableEpicCounts()
 
     tooltip:Hide()
     self._soonestLootExpiry = soonest    -- nil if nothing windowed; drives the expiry re-scan timer
+    self._sawLoadingItem = loading       -- a cold-cache item was present; OnBagUpdate arms a re-scan
     return counts
 end
 
@@ -640,6 +648,18 @@ function addon:OnBagUpdate()
     -- A trade window lapsing fires no game event, so schedule a single re-scan for just after the
     -- soonest-to-expire item lapses; that pass drops it from the list, syncs raiders, and re-arms.
     self:ArmTradeExpiryTimer(self._soonestLootExpiry)
+
+    -- This scan saw an item whose data had not loaded yet, so it could not be classified/surfaced.
+    -- Re-scan shortly (the scan above already nudged the fetch) so it pops the moment the data lands,
+    -- instead of waiting for the next loot or the 60s reconcile. A clean scan resets the retry budget.
+    -- Only once settled: during the post-login bag load the whole bag reads cold, and surfacing is
+    -- suppressed there anyway, so retrying then is pure churn. In a raid bags are long settled, so the
+    -- genuine case (a fresh drop whose data lags) is unaffected.
+    if settled and self._sawLoadingItem then
+        self:ScheduleLoadRetry()
+    else
+        self._loadRetries = 0
+    end
     return true
 end
 
@@ -690,6 +710,19 @@ end)
 -- BAG_UPDATE so the scan lands BAG_SETTLE after the last event, draining the whole loot sweep at once.
 function addon:ScheduleBagReconcile()
     self._bagReconcileAt = GetTime() + BAG_SETTLE
+    bagDebounce:Show()
+end
+
+-- Re-scan a beat after a scan that saw a still-loading (cold-cache) item, so it surfaces as soon as
+-- its data arrives rather than on the next loot or the 60s reconcile. Capped: an item that never
+-- resolves must not spin the scan forever -- the periodic reconcile stays the backstop. A clean scan
+-- (no loading item) resets the budget in OnBagUpdate, so a later cold item gets a fresh allowance.
+local LOAD_RETRY = 0.5
+local LOAD_RETRY_MAX = 10
+function addon:ScheduleLoadRetry()
+    self._loadRetries = (self._loadRetries or 0) + 1
+    if self._loadRetries > LOAD_RETRY_MAX then return end
+    self._bagReconcileAt = GetTime() + LOAD_RETRY
     bagDebounce:Show()
 end
 
