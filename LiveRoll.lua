@@ -1126,11 +1126,13 @@ function addon:EnsureNameTicker()
                 end
             end
         end
-        -- the full loot list shares this resolve cycle: re-render it while any of its item names
-        -- are still uncached (RefreshLootTab re-warms and re-flags), then let it fall out.
+        -- the loot list AND the results list share this resolve cycle: re-render both while any of
+        -- their item names are still uncached (each re-warms and re-flags _lootNamesPending), then
+        -- let it fall out once everything has resolved.
         if self._lootNamesPending then
             self._lootNamesPending = false
             if self.RefreshLootTab then self:RefreshLootTab() end
+            if self.RefreshResultsTab then self:RefreshResultsTab() end
             if self._lootNamesPending then pending = pending + 1 end
         end
         if pending == 0 then

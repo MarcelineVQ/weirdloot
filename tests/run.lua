@@ -1032,6 +1032,60 @@ test("cold cache: the loot list warms uncached item names via the scan-tooltip m
     eq(w.addon._lootNamesPending, false, "_lootNamesPending cleared -> ticker can stop")
 end)
 
+-- Cold-cache on the RESULTS tab. Unlike the Loot tab (which renders from a live projection and
+-- re-resolves every draw), a result record is a frozen, persisted snapshot: a lot resolved before
+-- its item data arrived bakes the "item:<id>" fallback into itemName/itemLink/detailText. These
+-- exercise the heal-in-place path (RehydrateResult) that the UI's RefreshResultsTab drives.
+test("results cold cache: ResultRealItemId recovers the real item id (record.itemId is the lot key)", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    local lotId = resolveOwedTo(w, 40005, "Alice")
+    local record = w.addon.lootCore:Get(lotId).record
+    check(string.find(record.itemId, "^L:") ~= nil, "record.itemId is the lot key, not the item id")
+    eq(w.addon:ResultRealItemId(record), 40005, "real item id recovered via the lot")
+end)
+
+test("results cold cache: a record resolved while cold heals in place once the data arrives", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    local warmed = false
+    local origRender = w.addon.util.ItemRender
+    w.addon.util.ItemRender = function(self, id)
+        if id == 40005 and not warmed then return nil, "item:" .. id, "Interface\\Icons\\INV_Misc_QuestionMark" end
+        return origRender(self, id)
+    end
+    local lotId = resolveOwedTo(w, 40005, "Alice")
+    local record = w.addon.lootCore:Get(lotId).record
+    eq(record.itemName, "item:40005", "name baked to the fallback while cold")
+    check(string.find(record.detailText or "", "item:40005", 1, true) ~= nil, "detail text baked the fallback too")
+
+    warmed = true                                   -- client now has the data
+    w.addon:RehydrateResult(record)
+    eq(record.itemName, "Blade of Test", "itemName healed to the real name")
+    check(string.find(record.itemLink, "Blade of Test", 1, true) ~= nil, "itemLink healed to the real link")
+    check(string.find(record.detailText, "Blade of Test", 1, true) ~= nil, "detail text rebuilt with the real name")
+    check(string.find(record.detailText, "item:40005", 1, true) == nil, "no stale fallback left in the detail text")
+end)
+
+test("results cold cache: a still-cold record keeps the fallback and flags the resolve ticker", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    local origRender = w.addon.util.ItemRender
+    w.addon.util.ItemRender = function(self, id)
+        if id == 40005 then return nil, "item:" .. id, "Interface\\Icons\\INV_Misc_QuestionMark" end
+        return origRender(self, id)
+    end
+    local primed = {}
+    w.addon.PrimeItemInfo = function(_, id) primed[id] = true end
+    local lotId = resolveOwedTo(w, 40005, "Alice")
+    local record = w.addon.lootCore:Get(lotId).record
+    w.addon._lootNamesPending = false
+    w.addon:RehydrateResult(record)
+    eq(record.itemName, "item:40005", "still the fallback while the data is cold")
+    check(primed[40005], "primed the client for the cold item (reused machinery)")
+    eq(w.addon._lootNamesPending, true, "flagged so the shared ticker re-renders the results tab")
+end)
+
 test("core persistence: the ledger snapshot carries owing (awards survive a reload)", function()
     local w = makeWorld("Masterlooter", true)
     startSession(w)

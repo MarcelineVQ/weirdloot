@@ -2754,6 +2754,10 @@ end
 function addon:RefreshResultsTab()
     self:UpdateResultsHeaderLabels()
     local results = self:GetSortedResults()
+    -- Cold cache: a result resolved before its item data arrived baked the "item:<id>" fallback into
+    -- the record. Heal each in place (and prime + flag the resolve ticker for any still cold) so the
+    -- Results surfaces show the real name, the same way RefreshLootTab warms the Loot tab.
+    for _, result in ipairs(results) do self:RehydrateResult(result) end
     self.ui.resultsList.update(#results, function(row, index)
         local result = results[index]
         row.result = result
@@ -2830,6 +2834,9 @@ function addon:RefreshResultsTab()
         end
     end
 
+    -- arm the shared resolve ticker if any result name was still cold; it re-renders this tab as the
+    -- client caches them, then self-stops (same machinery the Loot tab and roll popups use).
+    if self._lootNamesPending then self:EnsureNameTicker() end
 end
 
 function addon:RefreshMasterTab()
