@@ -3397,9 +3397,12 @@ function addon:PLAYER_LOGIN()
         },
         ui = {
             selectedTab = "loot",
-            lootSortMode = "name",
+            lootSortMode = "recent",       -- "recent" = mint order, newest first; name/type/slot/info via header click
+            lootSortDir = "asc",           -- header cycle: asc -> desc -> recent (off)
+            lootSortRecentApplied = true,  -- fresh installs already start on the recent default; see migration
             rosterSortMode = "name",
-            resultsSortMode = "default",   -- "default" = mint order; "name" or "winner" via header click
+            resultsSortMode = "default",   -- "default" = resolution time, newest first; "name" or "winner" via header click
+            resultsSortDir = "asc",        -- header cycle: asc -> desc -> default (off)
 
             lootUsabilitySort = false,
             liveRollPopups = {
@@ -3455,6 +3458,15 @@ function addon:PLAYER_LOGIN()
                 "%1demonology"
             )
         end
+    end
+
+    -- One-time flip to newest-mint-first Loot ordering for characters created before it existed
+    -- (their saved lootSortMode is "name"). Stamp so a later manual header click is not re-clobbered
+    -- each login; fresh installs ship with the stamp already set.
+    if WeirdLootDB.ui and not WeirdLootDB.ui.lootSortRecentApplied then
+        WeirdLootDB.ui.lootSortMode = "recent"
+        WeirdLootDB.ui.lootSortDir = "asc"
+        WeirdLootDB.ui.lootSortRecentApplied = true
     end
 
     self.db = WeirdLootDB

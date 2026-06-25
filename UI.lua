@@ -909,6 +909,7 @@ function addon:BuildLootTab()
     headerName:SetScript("OnClick", function()
         addon:SetLootSortMode("name")
     end)
+    headerName.baseLabel = "Name"
     panel.headerName = headerName
 
     local headerChoice = createButton(panel, "Roll Type", 204, 18)
@@ -921,6 +922,7 @@ function addon:BuildLootTab()
     headerType:SetScript("OnClick", function()
         addon:SetLootSortMode("type")
     end)
+    headerType.baseLabel = "Type"
     panel.headerType = headerType
 
     local headerSlot = createButton(panel, "Slot", 54, 18)
@@ -928,6 +930,7 @@ function addon:BuildLootTab()
     headerSlot:SetScript("OnClick", function()
         addon:SetLootSortMode("slot")
     end)
+    headerSlot.baseLabel = "Slot"
     panel.headerSlot = headerSlot
 
     local headerInfo = createButton(panel, "Info", 70, 18)
@@ -935,6 +938,7 @@ function addon:BuildLootTab()
     headerInfo:SetScript("OnClick", function()
         addon:SetLootSortMode("info")
     end)
+    headerInfo.baseLabel = "Info"
     panel.headerInfo = headerInfo
 
     local headerRollers = createButton(panel, "Rollers", 80, 18)
@@ -1205,8 +1209,20 @@ function addon:ToggleLootSortMode()
     self:RefreshLootTab()
 end
 
-function addon:SetLootSortMode(sortMode)
-    self.db.ui.lootSortMode = sortMode or "name"
+-- Header click is tri-state (same as the Results tab): first click on a column sorts it ascending,
+-- second flips to descending, third turns the column sort off and falls back to the "recent"
+-- default (mint order, newest first). Clicking a different column starts it fresh at ascending.
+function addon:SetLootSortMode(mode)
+    local ui = self.db.ui
+    if ui.lootSortMode ~= mode then
+        ui.lootSortMode = mode
+        ui.lootSortDir = "asc"
+    elseif ui.lootSortDir ~= "desc" then
+        ui.lootSortDir = "desc"
+    else
+        ui.lootSortMode = "recent"
+        ui.lootSortDir = "asc"
+    end
     self:RefreshLootTab()
 end
 
@@ -1217,96 +1233,65 @@ end
 
 function addon:GetSortedLootItems()
     local items = {}
-    for _, item in ipairs(self.lootView.items or {}) do
+    for i, item in ipairs(self.lootView.items or {}) do
+        item._mint = i   -- source arrives in mint order (oldest first); used by the "recent" sort
         items[#items + 1] = item
     end
 
-    local sortMode = self.db.ui.lootSortMode or "name"
-    if sortMode == "gear" then
-        table.sort(items, function(left, right)
-            if self.db.ui.lootUsabilitySort then
-                local leftUsable = isItemUsableForPlayer(left.link)
-                local rightUsable = isItemUsableForPlayer(right.link)
-                if leftUsable ~= rightUsable then
-                    return leftUsable
-                end
-            end
+    local sortMode = self.db.ui.lootSortMode or "recent"
+    local desc = self.db.ui.lootSortDir == "desc"
 
+    -- Ascending comparator for the active column. Direction and the usable-first grouping are
+    -- applied uniformly in the table.sort wrapper below, so each mode only states its own key.
+    local keyCmp
+    if sortMode == "gear" then
+        keyCmp = function(left, right)
             local leftInfo = util:GetLootSortInfo(left.link)
             local rightInfo = util:GetLootSortInfo(right.link)
-
-            if leftInfo.order ~= rightInfo.order then
-                return leftInfo.order < rightInfo.order
-            end
-            if leftInfo.subtype ~= rightInfo.subtype then
-                return leftInfo.subtype < rightInfo.subtype
-            end
+            if leftInfo.order ~= rightInfo.order then return leftInfo.order < rightInfo.order end
+            if leftInfo.subtype ~= rightInfo.subtype then return leftInfo.subtype < rightInfo.subtype end
             return util:NormalizeKey(left.name or "") < util:NormalizeKey(right.name or "")
-        end)
+        end
     elseif sortMode == "type" then
-        table.sort(items, function(left, right)
-            if self.db.ui.lootUsabilitySort then
-                local leftUsable = isItemUsableForPlayer(left.link)
-                local rightUsable = isItemUsableForPlayer(right.link)
-                if leftUsable ~= rightUsable then
-                    return leftUsable
-                end
-            end
-
+        keyCmp = function(left, right)
             local leftType = util:NormalizeKey(select(1, getLootItemColumns(left.link)))
             local rightType = util:NormalizeKey(select(1, getLootItemColumns(right.link)))
-            if leftType ~= rightType then
-                return leftType < rightType
-            end
+            if leftType ~= rightType then return leftType < rightType end
             return util:NormalizeKey(left.name or "") < util:NormalizeKey(right.name or "")
-        end)
+        end
     elseif sortMode == "slot" then
-        table.sort(items, function(left, right)
-            if self.db.ui.lootUsabilitySort then
-                local leftUsable = isItemUsableForPlayer(left.link)
-                local rightUsable = isItemUsableForPlayer(right.link)
-                if leftUsable ~= rightUsable then
-                    return leftUsable
-                end
-            end
-
+        keyCmp = function(left, right)
             local leftSlot = util:NormalizeKey(select(2, getLootItemColumns(left.link)))
             local rightSlot = util:NormalizeKey(select(2, getLootItemColumns(right.link)))
-            if leftSlot ~= rightSlot then
-                return leftSlot < rightSlot
-            end
+            if leftSlot ~= rightSlot then return leftSlot < rightSlot end
             return util:NormalizeKey(left.name or "") < util:NormalizeKey(right.name or "")
-        end)
+        end
     elseif sortMode == "info" then
-        table.sort(items, function(left, right)
-            if self.db.ui.lootUsabilitySort then
-                local leftUsable = isItemUsableForPlayer(left.link)
-                local rightUsable = isItemUsableForPlayer(right.link)
-                if leftUsable ~= rightUsable then
-                    return leftUsable
-                end
-            end
-
+        keyCmp = function(left, right)
             local leftInfo = util:NormalizeKey(getLootItemInfoText(left))
             local rightInfo = util:NormalizeKey(getLootItemInfoText(right))
-            if leftInfo ~= rightInfo then
-                return leftInfo < rightInfo
-            end
+            if leftInfo ~= rightInfo then return leftInfo < rightInfo end
             return util:NormalizeKey(left.name or "") < util:NormalizeKey(right.name or "")
-        end)
+        end
+    elseif sortMode == "name" then
+        keyCmp = function(left, right)
+            return util:NormalizeKey(left.name or "") < util:NormalizeKey(right.name or "")
+        end
     else
-        table.sort(items, function(left, right)
-            if self.db.ui.lootUsabilitySort then
-                local leftUsable = isItemUsableForPlayer(left.link)
-                local rightUsable = isItemUsableForPlayer(right.link)
-                if leftUsable ~= rightUsable then
-                    return leftUsable
-                end
-            end
-
-            return util:NormalizeKey(left.name or "") < util:NormalizeKey(right.name or "")
-        end)
+        -- "recent": mint order, newest first (higher mint index on top). This is the default and the
+        -- tri-state "off" state; the header cycle never lands here with desc set, so it stays newest-first.
+        keyCmp = function(left, right) return left._mint > right._mint end
     end
+
+    table.sort(items, function(left, right)
+        if self.db.ui.lootUsabilitySort then
+            local leftUsable = isItemUsableForPlayer(left.link)
+            local rightUsable = isItemUsableForPlayer(right.link)
+            if leftUsable ~= rightUsable then return leftUsable end
+        end
+        if desc then return keyCmp(right, left) end   -- swapping args reverses the ordering, ties included
+        return keyCmp(left, right)
+    end)
 
     return items
 end
@@ -1421,10 +1406,14 @@ function addon:BuildResultsTab()
     local nameHeader = createButton(panel, "Item Name", 290, 18)
     nameHeader:SetPoint("TOPLEFT", panel, "TOPLEFT", 4, -4)
     nameHeader:SetScript("OnClick", function() addon:SetResultsSortMode("name") end)
+    nameHeader.baseLabel = "Item Name"
+    self.ui.resultsNameHeader = nameHeader
 
     local winnerHeader = createButton(panel, "Who Won", 170, 18)
     winnerHeader:SetPoint("LEFT", nameHeader, "RIGHT", 12, 0)
     winnerHeader:SetScript("OnClick", function() addon:SetResultsSortMode("winner") end)
+    winnerHeader.baseLabel = "Who Won"
+    self.ui.resultsWinnerHeader = winnerHeader
 
     -- 21 rows fills the full-height list (content is ~532px; 24px row pitch) instead of leaving the
     -- lower third of the panel as empty backdrop.
@@ -2547,7 +2536,26 @@ function addon:RefreshUI()
     self:RefreshMasterTab()
 end
 
+-- Show which column is sorting and which way: "^" ascending, "v" descending, nothing when the
+-- column is off (the recent default, which highlights no header).
+function addon:UpdateLootHeaderLabels()
+    local panel = self.ui.panels and self.ui.panels.loot
+    if not panel then return end
+    local mode = (self.db.ui and self.db.ui.lootSortMode) or "recent"
+    local arrow = (self.db.ui and self.db.ui.lootSortDir == "desc") and " v" or " ^"
+    local headers = {
+        name = panel.headerName, type = panel.headerType,
+        slot = panel.headerSlot, info = panel.headerInfo,
+    }
+    for key, header in pairs(headers) do
+        if header and header.baseLabel then
+            header:SetText(header.baseLabel .. (mode == key and arrow or ""))
+        end
+    end
+end
+
 function addon:RefreshLootTab()
+    self:UpdateLootHeaderLabels()
     local items = self:GetSortedLootItems()
     local playerName = util:GetPlayerName("player")
     if self.ui.panels and self.ui.panels.loot and self.ui.panels.loot.usabilityButton then
@@ -2673,20 +2681,33 @@ function addon:RefreshRaidersTab()
     end)
 end
 
+-- Header click is tri-state: first click on a column sorts it ascending, second flips to
+-- descending, third turns sorting off (back to the resolution-time default). Clicking a
+-- different column starts that column fresh at ascending.
 function addon:SetResultsSortMode(mode)
-    self.db.ui.resultsSortMode = mode or "default"
+    local ui = self.db.ui
+    if ui.resultsSortMode ~= mode then
+        ui.resultsSortMode = mode
+        ui.resultsSortDir = "asc"
+    elseif ui.resultsSortDir ~= "desc" then
+        ui.resultsSortDir = "desc"
+    else
+        ui.resultsSortMode = "default"
+        ui.resultsSortDir = "asc"
+    end
     self:RefreshResultsTab()
 end
 
--- Return a shallow copy of lootView.results sorted by the active mode. Stable on ties: the
--- comparator falls back to the original index so two items with the same key keep their
--- relative resolution order. Never mutates lootView.results itself.
+-- Return a shallow copy of lootView.results sorted by the active mode (default is resolution
+-- time). Stable on ties: the comparator falls back to the original index (mint order) so two
+-- items with the same key keep a deterministic order. Never mutates lootView.results itself.
 function addon:GetSortedResults()
     local out = {}
     for i, r in ipairs(self.lootView.results or {}) do
         out[#out + 1] = { _idx = i, r = r }
     end
     local mode = (self.db.ui and self.db.ui.resultsSortMode) or "default"
+    local asc = not (self.db.ui and self.db.ui.resultsSortDir == "desc")
     local function winnerNameOf(r)
         if r.winners and r.winners[1] then return r.winners[1] end
         return r.winnersText or r.winner or ""
@@ -2695,15 +2716,25 @@ function addon:GetSortedResults()
         table.sort(out, function(a, b)
             local an = string.lower(a.r.itemName or "")
             local bn = string.lower(b.r.itemName or "")
-            if an == bn then return a._idx < b._idx end
-            return an < bn
+            if an == bn then return a._idx < b._idx end   -- ties stay in mint order regardless of dir
+            if asc then return an < bn else return an > bn end
         end)
     elseif mode == "winner" then
         table.sort(out, function(a, b)
             local aw = string.lower(winnerNameOf(a.r))
             local bw = string.lower(winnerNameOf(b.r))
             if aw == bw then return a._idx < b._idx end
-            return aw < bw
+            if asc then return aw < bw else return aw > bw end
+        end)
+    else
+        -- default: resolution time, newest first. resolvedAt is second-granularity, so same-second
+        -- resolves (e.g. a batch) fall back to reverse mint order via _idx (later-minted on top).
+        -- Records mirrored from an older ML lack resolvedAt and collapse to that mint ordering.
+        table.sort(out, function(a, b)
+            local at = a.r.resolvedAt or 0
+            local bt = b.r.resolvedAt or 0
+            if at == bt then return a._idx > b._idx end
+            return at > bt
         end)
     end
     local flat = {}
@@ -2711,7 +2742,17 @@ function addon:GetSortedResults()
     return flat
 end
 
+-- Show which column is sorting and which way: "^" ascending, "v" descending, nothing when off.
+function addon:UpdateResultsHeaderLabels()
+    local mode = (self.db.ui and self.db.ui.resultsSortMode) or "default"
+    local arrow = (self.db.ui and self.db.ui.resultsSortDir == "desc") and " v" or " ^"
+    local nameH, winnerH = self.ui.resultsNameHeader, self.ui.resultsWinnerHeader
+    if nameH then nameH:SetText(nameH.baseLabel .. (mode == "name" and arrow or "")) end
+    if winnerH then winnerH:SetText(winnerH.baseLabel .. (mode == "winner" and arrow or "")) end
+end
+
 function addon:RefreshResultsTab()
+    self:UpdateResultsHeaderLabels()
     local results = self:GetSortedResults()
     self.ui.resultsList.update(#results, function(row, index)
         local result = results[index]

@@ -458,6 +458,7 @@ function LootCore:Resolve(id)
     winners = winners or {}
 
     lot.record = record
+    record.resolvedAt = time()   -- second-granularity resolution stamp; drives the Results default sort
     lot.awards = {}
     for i = 1, lot.count do
         local w = winners[i]
