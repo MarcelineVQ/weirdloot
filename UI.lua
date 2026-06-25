@@ -1640,10 +1640,8 @@ function addon:BuildMasterTab()
         addon:TogglePayout()
     end)
 
-    -- Allow-all-trades toggle. Default OFF (non-owed trades are auto-declined during payout to
-    -- keep loot handout clean). Flip ON when a raider needs to trade the LM something non-loot
-    -- (flask, charged battery, etc.) without the engine canceling the window.
-    local allowTradesButton = createButton(panel, "Allow All Trades: OFF", 160, 24)
+    -- Allow-all-trades toggle. Default ON. When OFF, every incoming trade is declined.
+    local allowTradesButton = createButton(panel, "Allow All Trades: ON", 160, 24)
     allowTradesButton:SetPoint("LEFT", payoutButton, "RIGHT", 8, 0)
     allowTradesButton:SetScript("OnClick", function()
         addon:ToggleAllowAllTrades()
@@ -1735,14 +1733,13 @@ function addon:BuildMasterTab()
     panel.allowTradesButton = allowTradesButton
 
     setButtonTooltip(allowTradesButton, "Allow All Trades (Toggle)",
-        "When OFF (default), trades opened by raiders who aren't on the payout list are auto-declined "
-        .. "during payout so the loot handout stays clean. Turn ON to let any raider open a trade with "
-        .. "the loot master (e.g. handing over a flask or other non-loot item).")
+        "When ON (default), incoming trades are allowed to open normally. When OFF, every incoming "
+        .. "trade is auto-declined immediately.")
 
     setButtonTooltip(payoutButton, "Payout Mode (Toggle)",
         "Turn automatic loot delivery on or off. While ON: each winner is whispered to open a trade with you, "
-        .. "and their owed items auto-fill into the trade window (you click Trade to send). Trades from non-winners "
-        .. "are declined while loot is still owed. Pause keeps the owed list but stops auto-fill.")
+        .. "and their owed items auto-fill into the trade window (you click Trade to send). If Allow All Trades "
+        .. "is OFF, incoming trades are declined before payout can fill them. Pause keeps the owed list but stops auto-fill.")
 		
 	setButtonTooltip(startButton, "Start Session",
         "Establishes the active loot session.")

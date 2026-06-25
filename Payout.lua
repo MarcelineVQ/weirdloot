@@ -110,11 +110,9 @@ function addon:StopPayout()
     end
 end
 
--- Allow-all-trades toggle. The trade engine's autoCancel flag, when on (default), declines a
--- trade from someone who isn't on the payout list while loot is still being handed out -- which
--- is what we want during payout, but blocks legitimate non-loot trades (a raider handing the ML
--- a flask, a charged battery, etc.). Flipping allow-all on disables that gate so every trade
--- opens normally; the loot master can still auto-fill an owed trade by hand via Fill Trade.
+-- Allow-all-trades toggle. This is now a hard master switch for incoming trades:
+-- when allow-all is OFF, every incoming trade is declined immediately; when ON,
+-- every incoming trade is allowed to open normally.
 function addon:IsAllowAllTrades()
     if not self.payout then return false end
     return not self.payout:GetAutoCancel()
@@ -124,8 +122,8 @@ function addon:SetAllowAllTrades(allow)
     if not self.payout then return end
     self.payout:SetAutoCancel(not allow)
     self:Print(allow
-        and "All trades allowed: non-owed trades will NOT be auto-declined during payout."
-        or "Non-owed trades will be auto-declined during payout.")
+        and "All trades allowed."
+        or "All incoming trades will be auto-declined.")
     refreshMaster(self)
 end
 

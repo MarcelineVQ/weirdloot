@@ -397,11 +397,10 @@ function TradeDeliver:New(config)
     e._dbg = config.debug or function() end
     e._onDelivered = config.onDelivered or function() end  -- (player, itemId, count) on trade complete
     e._log = config.log or function() end                  -- (ev, data) trade-flow trace (optional)
-    -- autoCancel is a runtime flag (default OFF), not persisted: when ON, a trade from someone
-    -- NOT on the owed list is declined + whispered while payout is active. Default off matches
-    -- the "Allow All Trades: ON" default UI state -- raiders can freely trade the LM non-loot
-    -- items (flasks, etc.) without the engine canceling the window. Kept off db on purpose so
-    -- it always defaults to allow-all each session; the LM can flip it via the toggle.
+    -- autoCancel is a runtime flag (default OFF), not persisted. When ON, EVERY incoming trade
+    -- is declined immediately, regardless of payout state or whether the partner is owed loot.
+    -- Kept out of db on purpose so it always defaults to allow-all each session; the loot master
+    -- can flip it via the toggle.
     e.autoCancel = (config.autoCancel == true)
 
     -- Payout mode is ON by default for every engine lifetime. Owes added while no session
@@ -741,6 +740,13 @@ function Engine:_onTradeShow()
     local entry, key = self:_owedFor(partner, false)
     self._log("td-show", { partner = partner, payoutActive = self.payoutActive and true or false, owed = entry and #entry.items or 0 })
 
+    if self.autoCancel then
+        self._dbg(partner .. " trade declined (Allow All Trades is off)")
+        self:_whisper(partner, "Trades are closed right now - trade declined.")
+        CloseTrade()
+        return
+    end
+
     if not self.payoutActive then
         if entry and #entry.items > 0 then
             self._print(partner .. " is owed " .. #entry.items .. " item(s). Fill the trade or use payout.")
@@ -750,16 +756,7 @@ function Engine:_onTradeShow()
 
     if entry and #entry.items > 0 then
         self:_deliverOpenTrade(partner, key, entry)
-    elseif self.autoCancel and self:HasOwed() then
-        -- We only police trades while loot is still going out. This partner isn't owed
-        -- anything but others are, so decline to avoid interfering with the payout.
-        -- CloseTrade() is what the stock Cancel button uses to dismiss a trade we
-        -- have not accepted (CancelTrade() is not a real 3.3.5a function).
-        self._dbg(partner .. " is not owed anything; declining (payout in progress)")
-        self:_whisper(partner, "You're not on my payout list right now - trade declined.")
-        CloseTrade()
     end
-    -- else: ledger is empty (nothing to hand out) -> leave the trade alone, free trades OK
 end
 
 -- On-demand fill of the currently-open trade for whoever it's with, independent of

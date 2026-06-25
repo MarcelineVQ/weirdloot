@@ -1552,6 +1552,32 @@ test("trade engine: declines a non-owed player's trade during payout", function(
     eq(owedCount(w), 1, "Alice still owed; nothing handed to Bob")
 end)
 
+test("trade engine: Allow All Trades OFF declines an owed player's trade during payout", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon:SetAllowAllTrades(false)
+    w.addon.payout:Owe("Alice", 40005, 1, linkFor(40005))
+    w.addon.payout:StartPayout()
+    local closesBefore = w.env.__closeTrade
+    setPartner(w, "Alice")
+    fireEvent(w, "TRADE_SHOW")
+    check(w.env.__closeTrade > closesBefore, "owed trade declined when allow-all is off")
+    eq(owedCount(w), 1, "owed item remains owed because the trade never opened")
+end)
+
+test("trade engine: Allow All Trades OFF declines trades even with payout paused", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon:SetAllowAllTrades(false)
+    w.addon.payout:Owe("Alice", 40005, 1, linkFor(40005))
+    w.addon:StopPayout()
+    local closesBefore = w.env.__closeTrade
+    setPartner(w, "Alice")
+    fireEvent(w, "TRADE_SHOW")
+    check(w.env.__closeTrade > closesBefore, "trade declined even while payout is off")
+    eq(owedCount(w), 1, "owed item remains owed with payout paused")
+end)
+
 test("trade engine: Allow All Trades default ON lets a non-owed trade open during payout", function()
     local w = makeWorld("Masterlooter", true)
     startSession(w)
