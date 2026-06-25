@@ -820,9 +820,33 @@ function addon:NotifyRollBatchFinished(lotId)
     self:AdvanceRollBatch()
 end
 
+-- Auto-start path: feed fresh NEW lot ids into the same batch infrastructure used by Start Rolls
+-- so the configured Start-Rolls batch size caps how many rolls fire in parallel. Creates a silent
+-- batch (no history snapshot / no RAID_WARNING on completion -- background drips shouldn't
+-- masquerade as a full Start-Rolls run). If a batch is already running, appends to its queue.
+function addon:EnqueueAutoStartLots(lotIds)
+    if not lotIds or #lotIds == 0 then return end
+    local batchSize = tonumber(self.db and self.db.options and self.db.options.rollBatchSize) or 5
+    if batchSize < 1 then batchSize = 1 end
+    if not self._rollBatch then
+        self._rollBatch = { queue = {}, batchSize = batchSize, active = {}, silent = true }
+    end
+    for _, id in ipairs(lotIds) do
+        self._rollBatch.queue[#self._rollBatch.queue + 1] = id
+    end
+    self:AdvanceRollBatch()
+end
+
 function addon:FinishRollBatch()
     local session = self:GetCurrentSession()
+    local silent = self._rollBatch and self._rollBatch.silent
     self._rollBatch = nil
+
+    if silent then
+        self:BroadcastSession()
+        self:TriggerCallback("RESULTS_UPDATED")
+        return
+    end
 
     self.sessionDb.history = self.sessionDb.history or {}
     self.sessionDb.history[#self.sessionDb.history + 1] = {

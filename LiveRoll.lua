@@ -187,25 +187,22 @@ function addon:SyncPendingPopups()
     local optAutoStart = opt.autoStartRoll
     local optAutoSkip = opt.autoSkipRoll
     if optAutoStart and not optAutoSkip then
-        -- Collect the whole NEW batch first, order it, then start each. The _autoStarting guard
-        -- (top of this function) neutralizes the ledgerChanged re-entry each StartLiveRoll causes,
-        -- so this outer loop is the sole driver and the dispatch order is preserved.
+        -- Collect the whole NEW batch first, order it, then hand it to the shared batch
+        -- infrastructure (same one Start Rolls uses) so the Start-Rolls batch size caps how many
+        -- rolls fire in parallel: e.g. 7 fresh lots with batchSize=5 -> 5 broadcast immediately,
+        -- the remaining 2 dispatched as the current batch drains via NotifyRollBatchFinished ->
+        -- AdvanceRollBatch. The _autoStarting guard neutralizes the ledgerChanged re-entry each
+        -- StartLiveRoll causes, so the enqueue+drain happens before another re-entry hits.
         local toStart = {}
         for _, lot in ipairs(core:List()) do
             if lot.state == core.STATE.NEW then toStart[#toStart + 1] = lot.id end
         end
         toStart = self:OrderLotIdsNonEquipFirst(toStart)   -- non-equipment (bags/mounts) rolls first
-        -- pcall so a StartLiveRoll error cannot leave _autoStarting latched true, which would
-        -- silently disable every future auto-start until /reload. Re-raise so the error still shows.
+        -- pcall so an EnqueueAutoStartLots error cannot leave _autoStarting latched true, which
+        -- would silently disable every future auto-start until /reload. Re-raise so the error
+        -- still shows.
         self._autoStarting = true
-        local ok, err = pcall(function()
-            for _, lotId in ipairs(toStart) do
-                local cur = core:Get(lotId)
-                if cur and cur.state == core.STATE.NEW then
-                    self:StartLiveRoll(lotId)
-                end
-            end
-        end)
+        local ok, err = pcall(function() self:EnqueueAutoStartLots(toStart) end)
         self._autoStarting = false
         if not ok then error(err, 0) end
     elseif self.db and self.db.autoRoll and not optAutoSkip then

@@ -1760,6 +1760,61 @@ end)
 -- OrderLotIdsNonEquipFirst order, NOT reversed. Regression for the synchronous-ledgerChanged
 -- re-entrancy that drained the batch depth-first and reversed it for raiders.
 -- ---------------------------------------------------------------------------
+test("auto-start respects rollBatchSize: 7 fresh lots with batchSize=5 broadcast 5 immediately", function()
+    local ml = makeWorld("Masterlooter", true)
+    local sent = {}
+    local origSend = ml.addon.SendLargeMessage
+    ml.addon.SendLargeMessage = function(self, command, values, ...)
+        if command == "DROP" then sent[#sent + 1] = tonumber(values[2]) end
+        return origSend(self, command, values, ...)
+    end
+    startSession(ml)
+    ml.addon.db.autoRoll = false
+    ml.addon.db.options = ml.addon.db.options or {}
+    ml.addon.db.options.autoStartRoll = false
+    ml.addon.db.options.autoSkipRoll = false
+    ml.addon.db.options.rollBatchSize = 5
+
+    -- mint 7 lots quietly (auto-start off), then flip on and drive one batch pass.
+    for i = 1, 7 do setBag(ml, 40000 + i, 1); bagUpdate(ml) end
+    clearWire()
+    ml.addon.db.options.autoStartRoll = true
+    ml.addon:SyncPendingPopups()
+
+    -- Only the first batchSize lots should have broadcast a DROP; the remaining 2 are queued.
+    eq(#sent, 5, "exactly batchSize (5) DROPs broadcast immediately")
+    eq(ml.addon:CountActiveRollBatch(), 5, "5 lots are active in the batch")
+    eq(ml.addon._rollBatch and #ml.addon._rollBatch.queue, 2, "2 lots remain queued")
+end)
+
+test("auto-start: the remaining queue drains as the active rolls finish", function()
+    local ml = makeWorld("Masterlooter", true)
+    startSession(ml)
+    ml.addon.db.autoRoll = false
+    ml.addon.db.options = ml.addon.db.options or {}
+    ml.addon.db.options.autoStartRoll = false
+    ml.addon.db.options.autoSkipRoll = false
+    ml.addon.db.options.rollBatchSize = 5
+
+    for i = 1, 7 do setBag(ml, 40000 + i, 1); bagUpdate(ml) end
+    ml.addon.db.options.autoStartRoll = true
+    ml.addon:SyncPendingPopups()
+
+    eq(ml.addon:CountActiveRollBatch(), 5, "first batch is full (5 active)")
+    eq(#ml.addon._rollBatch.queue, 2, "2 lots queued for the next batch")
+
+    -- Resolve the 5 active rolls one by one. After the last, AdvanceRollBatch should start the
+    -- remaining 2 (queue empties to 0; active becomes 2).
+    local activeIds = {}
+    for id in pairs(ml.addon._rollBatch.active) do activeIds[#activeIds + 1] = id end
+    for _, id in ipairs(activeIds) do
+        ml.addon:ResolveLiveRoll(id)
+    end
+    -- Now the 2 queued lots should be active.
+    eq(ml.addon._rollBatch and ml.addon:CountActiveRollBatch(), 2, "remaining 2 lots now active")
+    eq(#ml.addon._rollBatch.queue, 0, "queue empty after second batch starts")
+end)
+
 test("auto-start broadcasts the batch in order (not reversed)", function()
     local ml = makeWorld("Masterlooter", true)
     local sent = {}
