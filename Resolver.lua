@@ -363,6 +363,46 @@ function addon:BuildResultDetail(result)
     return table.concat(lines, "\n")
 end
 
+-- A name that is still the bare "item:<id>" fallback util:ItemRender hands back while GetItemInfo is
+-- cold (see Util.lua). A resolved record built in that window bakes this into itemName/itemLink.
+local function isFallbackItemName(name)
+    return (not name) or name == "" or string.find(name, "^item:%d+$") ~= nil
+end
+
+-- The real (40194-style) item id for a result record. A record's own itemId field is the LOT key
+-- ("L:<seq>"), not the item id; the item id lives on the lot (lootCore identity) and, on raider
+-- records, also on realItemId. Fall back to the id embedded in the stored itemLink ("item:40194",
+-- present even when cold) so a record whose lot has been pruned still resolves.
+function addon:ResultRealItemId(result)
+    if not result then return nil end
+    if result.realItemId then return result.realItemId end
+    local lot = self.lootCore and self.lootCore:Get(result.itemId)
+    if lot and lot.itemId then return lot.itemId end
+    return tonumber(string.match(result.itemLink or "", "item:(%d+)"))
+end
+
+-- Heal a result that resolved while its item was cold: it baked the "item:<id>" fallback into the
+-- record's itemName/itemLink/icon/summary/detailText. Once the client has the data, rewrite those
+-- stored fields in place so every Results surface shows the real name and it sticks across renders and
+-- saves. While still cold, prime the client and flag the shared name ticker to retry. No-op once real.
+function addon:RehydrateResult(result)
+    if not result or not isFallbackItemName(result.itemName) then return end
+    local realId = self:ResultRealItemId(result)
+    if not realId then return end
+    local name, link, icon = util:ItemRender(realId)
+    if not name then
+        self:PrimeItemInfo(realId)
+        self._lootNamesPending = true
+        return
+    end
+    result.itemName, result.itemLink, result.itemIcon = name, link, icon
+    local winnersText = result.winnersText or result.winner or "No winner"
+    result.summary = (result.quantity or 1) >= 2
+        and string.format("%s x%d -> %s", name, result.quantity or 1, winnersText)
+        or string.format("%s -> %s", name, winnersText)
+    result.detailText = self:BuildResultDetail(result)
+end
+
 function addon:SelectWinningRolls(rolls, quantity)
     -- top-N: one distinct winner per copy (was hard-capped at 2; the core supports any N)
     local winnerCount = math.min(quantity or 1, #rolls)
