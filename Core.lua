@@ -3399,6 +3399,8 @@ function addon:PLAYER_LOGIN()
             selectedTab = "loot",
             lootSortMode = "name",
             rosterSortMode = "name",
+            resultsSortMode = "default",   -- "default" = mint order; "name" or "winner" via header click
+
             lootUsabilitySort = false,
             liveRollPopups = {
                 point = "TOP",
