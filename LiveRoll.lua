@@ -1438,6 +1438,12 @@ function addon:ShowResultPopup(roll, winners, sections, slot)
     setPopupHeight(f, getCompactResultPopupHeight(f))
 
     local myKey = util:NormalizeKey(util:GetPlayerName("player") or "")
+    local function displaySectionLabel(sectionLabel, member)
+        if member and member.isNamed then
+            return "LC Prio"
+        end
+        return sectionLabel or "?"
+    end
 
     -- The core hands us `winners` as an ordered list of name strings; enrich each with its roll
     -- and priority section from the breakdown so the popup can render the class-colored
@@ -1447,12 +1453,13 @@ function addon:ShowResultPopup(roll, winners, sections, slot)
     for _, winnerName in ipairs(winners or {}) do
         local winnerKey = util:NormalizeKey(winnerName)
         winnerKeys[winnerKey] = true
-        local winnerSection, winnerRoll
+        local winnerSection, winnerRoll, winnerMember
         for _, s in ipairs(sections or {}) do
             for _, m in ipairs(s.members) do
                 if util:NormalizeKey(m.name) == winnerKey then
-                    winnerSection = s.label
+                    winnerSection = displaySectionLabel(s.label, m)
                     winnerRoll = m.roll
+                    winnerMember = m
                     break
                 end
             end
@@ -1462,6 +1469,7 @@ function addon:ShowResultPopup(roll, winners, sections, slot)
             name = winnerName,
             roll = winnerRoll,
             section = winnerSection,
+            isNamed = winnerMember and winnerMember.isNamed or false,
             key = winnerKey,
         }
     end
@@ -1543,7 +1551,7 @@ function addon:ShowResultPopup(roll, winners, sections, slot)
                 for _, m in ipairs(s.members) do mem[#mem + 1] = m end
                 for _, m in ipairs(mem) do
                     local key = util:NormalizeKey(m.name)
-                    local winnerType = s.label or "?"
+                    local winnerType = displaySectionLabel(s.label, m)
                     local className = getPlayerClassName(self, key)
                     GameTooltip:AddLine(string.format("  %s - %s - %s", util:ColorPlayerName(m.name, className), tostring(m.roll or "-"), winnerType), 1, 1, 1)
                 end
@@ -1808,7 +1816,7 @@ function addon:SectionsFromResult(record)
         local b = d.responseType or "pass"
         if b ~= "pass" then
             buckets[b] = buckets[b] or {}
-            buckets[b][#buckets[b] + 1] = { name = d.name, roll = tonumber(d.rollText) }
+            buckets[b][#buckets[b] + 1] = { name = d.name, roll = tonumber(d.rollText), isNamed = d.isNamed or false }
         end
     end
     local sections = {}
@@ -1826,7 +1834,9 @@ function addon:EncodeSections(sections)
     local secParts = {}
     for _, s in ipairs(sections or {}) do
         local mem = {}
-        for _, m in ipairs(s.members) do mem[#mem + 1] = m.name .. "=" .. (m.roll or 0) end
+        for _, m in ipairs(s.members) do
+            mem[#mem + 1] = m.name .. "=" .. (m.roll or 0) .. "=" .. ((m.isNamed and "1") or "0")
+        end
         secParts[#secParts + 1] = (s.label or "") .. "~" .. table.concat(mem, ",")
     end
     return table.concat(secParts, ";")
@@ -1837,8 +1847,14 @@ function addon:DecodeSections(text)
     for _, secText in ipairs(util:Split(text or "", ";")) do
         local label, memText = string.match(secText, "^(.-)~(.*)$")
         local members = {}
-        for name, value in string.gmatch(memText or "", "([^=,]+)=([^,]+)") do
-            members[#members + 1] = { name = name, roll = tonumber(value) }
+        for memberText in string.gmatch((memText or "") .. ",", "([^,]*),") do
+            local name, value, namedFlag = string.match(memberText, "^([^=,]+)=([^=,]+)=([^=,]+)$")
+            if not name then
+                name, value = string.match(memberText, "^([^=,]+)=([^=,]+)$")
+            end
+            if name then
+                members[#members + 1] = { name = name, roll = tonumber(value), isNamed = namedFlag == "1" }
+            end
         end
         sections[#sections + 1] = { label = label or "", members = members }
     end

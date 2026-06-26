@@ -127,6 +127,13 @@ local function formatCandidateSummary(candidate)
     return table.concat(parts, " - ")
 end
 
+local function winnerPriorityLabel(winner)
+    if winner and winner.isNamed then
+        return "LC Prio"
+    end
+    return nil
+end
+
 local RESULT_RESPONSE_GROUPS = {
     { key = "bis", label = "BiS Rollers:" },
     { key = "ms", label = "MS Rollers:" },
@@ -376,7 +383,8 @@ function addon:BuildResultDetail(result)
         for _, winner in ipairs(result.winnerDetails or {}) do
             local rollValue = winner.auto and "AUTO" or tostring(winner.roll or "")
             local winnerName = (util:GetClassColorCode(winner.className) or "|cffffffff") .. (winner.name or "Unknown") .. "|r"
-            lines[#lines + 1] = string.format("%s (%s)", winnerName, rollValue)
+            local priorityText = winnerPriorityLabel(winner)
+            lines[#lines + 1] = string.format("%s (%s)%s", winnerName, rollValue, priorityText and (" - " .. priorityText) or "")
         end
     end
     return table.concat(lines, "\n")
@@ -591,6 +599,7 @@ function addon:ResolveSessionItem(lot)
         local rollers = self:BuildRollerList(lot)
         local allRollerNames = {}
         local allRollerDetails = {}
+        local namedRule = self:GetNamedRule(item.name)
         for _, roller in ipairs(rollers) do
             allRollerNames[#allRollerNames + 1] = roller.name
             allRollerDetails[#allRollerDetails + 1] = {
@@ -599,6 +608,7 @@ function addon:ResolveSessionItem(lot)
                 specName = roller.specName,
                 status = roller.status,
                 responseType = roller.responseType,
+                isNamed = self:IsCandidateNamedForItem(namedRule, roller.name),
             }
         end
 
@@ -611,8 +621,6 @@ function addon:ResolveSessionItem(lot)
             local matchedRoll = allRollByName[util:NormalizeKey(detail.name)]
             detail.rollText = matchedRoll and (matchedRoll.auto and "AUTO" or tostring(matchedRoll.roll)) or nil
         end
-
-        local namedRule = self:GetNamedRule(item.name)
         local lootRule = self:GetLootRule(item.name)
         local defaultSpecPriorityText = lootRule and lootRule.raw or (self:RuleHasLootCouncil(namedRule) and "LC" or nil)
         local responsePriorityCandidates = self:FilterByResponsePriority(rollers)
@@ -723,6 +731,7 @@ function addon:ResolveSessionItem(lot)
                     className = winnerCandidate.className,
                     roll = matchedRoll and matchedRoll.roll or nil,
                     auto = matchedRoll and matchedRoll.auto or false,
+                    isNamed = self:IsCandidateNamedForItem(namedRule, winnerName),
                 }
             end
 
@@ -792,6 +801,7 @@ function addon:ResolveSessionItem(lot)
                     className = winnerCandidate.className,
                     roll = matchedRoll and matchedRoll.roll or nil,
                     auto = matchedRoll and matchedRoll.auto or false,
+                    isNamed = self:IsCandidateNamedForItem(namedRule, winnerName),
                 }
             end
 

@@ -808,7 +808,8 @@ function addon:BuildDetailedExportLogText()
         else
             for _, winner in ipairs(result.winnerDetails or {}) do
                 local rollValue = winner.auto and "AUTO" or tostring(winner.roll or "")
-                lines[#lines + 1] = string.format("%s (%s)", winner.name or "Unknown", rollValue)
+                local priorityText = winner.isNamed and " - LC Prio" or ""
+                lines[#lines + 1] = string.format("%s (%s)%s", winner.name or "Unknown", rollValue, priorityText)
             end
         end
 

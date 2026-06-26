@@ -180,13 +180,13 @@ function addon:BuildRecordValue(record)
     end
     return {
         allRollerDetails = rows(record.allRollerDetails, function(d)
-            return { name = d.name, responseType = d.responseType, rollText = d.rollText }
+            return { name = d.name, responseType = d.responseType, rollText = d.rollText, isNamed = d.isNamed or nil }
         end),
         rollDetails = rows(record.rollDetails, function(d)
             return { name = d.name, roll = d.roll, auto = d.auto or nil, isNamed = d.isNamed or nil }
         end),
         winnerDetails = rows(record.winnerDetails, function(d)
-            return { name = d.name, roll = d.roll, auto = d.auto or nil }
+            return { name = d.name, roll = d.roll, auto = d.auto or nil, isNamed = d.isNamed or nil }
         end),
         specPriorityText = record.specPriorityText,
         lcNamesText = record.lcNamesText,
@@ -207,7 +207,7 @@ local function renderRemoteRecordFull(self, lotId, itemId, count, winners, rv)
     for _, d in ipairs(rv.allRollerDetails or {}) do
         local prof = profile(d.name)
         record.allRollerDetails[#record.allRollerDetails + 1] = {
-            name = d.name, responseType = d.responseType, rollText = d.rollText,
+            name = d.name, responseType = d.responseType, rollText = d.rollText, isNamed = d.isNamed or false,
             className = prof.className, specName = prof.specName, status = prof.status,
         }
     end
@@ -224,7 +224,7 @@ local function renderRemoteRecordFull(self, lotId, itemId, count, winners, rv)
     record.winnerDetails = {}
     for _, d in ipairs(rv.winnerDetails or {}) do
         record.winnerDetails[#record.winnerDetails + 1] = {
-            name = d.name, roll = d.roll, auto = d.auto or false, className = profile(d.name).className,
+            name = d.name, roll = d.roll, auto = d.auto or false, isNamed = d.isNamed or false, className = profile(d.name).className,
         }
     end
 

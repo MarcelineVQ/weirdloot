@@ -426,6 +426,28 @@ test("shipped defaults: 40s rolls, 10s winner popup auto-close, auto-start on", 
     eq(w.shippedDefaults.autoStartRoll, true, "new loot auto-starts rolls by default")
 end)
 
+test("named-item winners render as LC Prio instead of BiS", function()
+    local w = makeWorld("Masterlooter", true)
+    local record = {
+        allRollerDetails = {
+            { name = "Volcker", responseType = "bis", rollText = "88", isNamed = true },
+        },
+        winnerDetails = {
+            { name = "Volcker", className = "Warrior", roll = 88, isNamed = true },
+        },
+        winners = { "Volcker" },
+        itemName = "Item-name",
+        quantity = 1,
+        lcNamesText = "",
+        specPriorityText = "",
+    }
+
+    local sections = w.addon:SectionsFromResult(record)
+    local detailText = w.addon:BuildResultDetail(record)
+    eq(sections[1] and sections[1].members[1] and sections[1].members[1].isNamed, true, "named flag carried into popup sections")
+    check(string.find(detailText, "LC Prio", 1, true) ~= nil, "resolver detail text labels named winners as LC Prio")
+end)
+
 test("session start baselines existing loot as idle (no auto-roll)", function()
     local w = makeWorld("Masterlooter", true)
     setBag(w, 40001, 1)             -- already carrying one before the session
