@@ -2036,7 +2036,7 @@ function addon:BuildOptionsTab()
     autoRollCB:SetPoint("TOPLEFT", batchLabel, "BOTTOMLEFT", 0, -16)
     autoRollCB:SetChecked(self.db.autoRoll == true)
 
-    local autoStartCB = createOptionsCheckbox(panel, "Auto-start a live roll when new loot lands in bags (broadcasts immediately, no popup)")
+    local autoStartCB = createOptionsCheckbox(panel, "Auto-start rolls when loot lands in bags (popups start already rolling)")
     autoStartCB:SetPoint("TOPLEFT", autoRollCB, "BOTTOMLEFT", 0, -8)
     autoStartCB:SetChecked(opt.autoStartRoll and true or false)
 

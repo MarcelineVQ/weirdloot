@@ -8,8 +8,7 @@
 ## SavedVariablesPerCharacter: WeirdLootDebugLog
 
 Libs\LibStub\LibStub.lua
-Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
-Libs\AceComm-3.0\ChatThrottleLib.lua
+Libs\ChatThrottleLib\ChatThrottleLib.lua
 Libs\LibDeflate\LibDeflate.lua
 Libs\LibSerialize\LibSerialize.lua
 Libs\WeirdComm-1.0\WeirdComm-1.0.lua

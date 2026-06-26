@@ -211,18 +211,8 @@ local function makeWorld(playerName, isML)
     env.GetInstanceInfo = function() return "none", "none" end
     env.InCombatLockdown = function() return false end
 
-    -- ---- LibStub + libs (AceComm fake routes to the shared WIRE) ----
+    -- ---- LibStub + libs ----
     local libs = {}
-    local aceComm = {
-        Embed = function(_, target)
-            target.SendCommMessage = function(_, prefix, msg, dist, tgt, prio)
-                WIRE[#WIRE + 1] = { prefix = prefix, msg = msg, dist = dist, target = tgt, sender = playerName, prio = prio }
-            end
-            target.RegisterComm = function() end
-        end,
-    }
-    libs["AceComm-3.0"] = aceComm
-    libs["CallbackHandler-1.0"] = { New = function() return {} end }
     -- Fake WeirdComm: pass-through transport for the WeirdSync (WLSYNC) lane. Records the logical
     -- VALUE on the wire (deep-copied to mimic serialize-on-send). The real codec/chunk/pace is
     -- covered by tests/weirdcomm.lua; the real-lib seam by tests/integration.lua.
