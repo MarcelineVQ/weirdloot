@@ -253,6 +253,12 @@ local function makeWorld(playerName, isML)
     addon.InitializeUI = function() end       -- UI not loaded in the harness
     addon:PLAYER_LOGIN()
     if os.getenv("WLDEBUG") then env.WeirdLootDB.payoutDebug = true end
+    local shippedDefaults = {
+        rollDuration = addon.db and addon.db.options and addon.db.options.rollDuration,
+        resultPopupAutoCloseEnabled = addon.db and addon.db.options and addon.db.options.resultPopupAutoCloseEnabled,
+        resultPopupAutoCloseSeconds = addon.db and addon.db.options and addon.db.options.resultPopupAutoCloseSeconds,
+        autoStartRoll = addon.db and addon.db.options and addon.db.options.autoStartRoll,
+    }
 
     -- ---- force the loot-authority + scan into a deterministic test state ----
     addon.roster = addon.roster or {}
@@ -261,6 +267,8 @@ local function makeWorld(playerName, isML)
     addon.lootCore:SetML("Masterlooter")
     addon.bagSettleAt = 0                     -- bags considered settled
     addon.db.autoRoll = true
+    addon.db.options = addon.db.options or {}
+    addon.db.options.autoStartRoll = false    -- harness baseline: fresh loot stays pending unless a test opts in
 
     -- inject eligible bag counts directly (skip tooltip scraping)
     addon.__bag = {}                          -- itemId -> count (test-controlled)
@@ -281,7 +289,7 @@ local function makeWorld(playerName, isML)
     addon.GetAttendee = function(_, name) return { name = cap(name), className = "Warrior", specName = "Arms", status = "main" } end
     addon.GetAttendees = function() return {} end
 
-    return { addon = addon, env = env, player = playerName }
+    return { addon = addon, env = env, player = playerName, shippedDefaults = shippedDefaults }
 end
 
 -- ---------------------------------------------------------------------------
@@ -408,6 +416,14 @@ end
 test("core self-checks (in-harness)", function()
     local w = makeWorld("Masterlooter", true)
     check(w.addon.LootCore.RunSelfChecks(false), "all core self-checks pass")
+end)
+
+test("shipped defaults: 40s rolls, 10s winner popup auto-close, auto-start on", function()
+    local w = makeWorld("Masterlooter", true)
+    eq(w.shippedDefaults.rollDuration, 40, "roll duration default is 40s")
+    eq(w.shippedDefaults.resultPopupAutoCloseEnabled, true, "winner popup auto-close is enabled by default")
+    eq(w.shippedDefaults.resultPopupAutoCloseSeconds, 10, "winner popup auto-close duration is 10s")
+    eq(w.shippedDefaults.autoStartRoll, true, "new loot auto-starts rolls by default")
 end)
 
 test("session start baselines existing loot as idle (no auto-roll)", function()
@@ -885,11 +901,11 @@ test("rejoin mid-roll: raider restores the roll popup with the ML's remaining ti
     startSession(ml)
     setBag(ml, 40005, 1); bagUpdate(ml)
     local lot = openLot(ml, 40005)
-    ml.addon:StartLiveRoll(lot.id)                 -- ML rolls; deadline = now + 30s (default duration)
+    ml.addon:StartLiveRoll(lot.id)                 -- ML rolls; deadline = now + 40s (default duration)
     local mlRoll = ml.addon.live.rolls[lot.id]
     check(mlRoll and mlRoll.deadline, "ML recorded a roll deadline")
 
-    CLOCK = CLOCK + 6                              -- 6s elapse on the ML's roll (24s left)
+    CLOCK = CLOCK + 6                              -- 6s elapse on the ML's roll (34s left)
     clearWire()
     ml.addon:BroadcastSession()                   -- a freshly-reloaded raider pulls the full snapshot
     flushWireTo(raider)
@@ -898,8 +914,8 @@ test("rejoin mid-roll: raider restores the roll popup with the ML's remaining ti
     check(rr ~= nil, "raider restored a roll record for the rolling lot")
     check(raider.addon:HasOpenRollForLot(lot.id), "raider has an open roll popup")
     local remaining = rr and rr.deadline and (rr.deadline - CLOCK) or nil
-    check(remaining ~= nil and remaining >= 23.5 and remaining <= 24.5,
-        "restored countdown reflects the ML's remaining ~24s, not a fresh 30s (got " .. tostring(remaining) .. ")")
+    check(remaining ~= nil and remaining >= 33.5 and remaining <= 34.5,
+        "restored countdown reflects the ML's remaining ~34s, not a fresh 40s (got " .. tostring(remaining) .. ")")
 end)
 
 -- ---- live pick list (RSTATE): raiders see who is rolling, in real time ----
