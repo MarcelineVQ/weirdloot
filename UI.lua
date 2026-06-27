@@ -2403,7 +2403,7 @@ local function shineOnUpdate(shine, elapsed)
         s:SetPoint("CENTER", shine, "CENTER", math.cos(a) * radius, math.sin(a) * radius)
         local tw = 0.5 + 0.5 * math.sin(now * 3 + i)   -- per-sparkle twinkle
         s:SetAlpha(0.35 + 0.65 * tw)
-        local sz = 5 + 3 * tw
+        local sz = 7 + 4 * tw
         s:SetWidth(sz); s:SetHeight(sz)
     end
 end
