@@ -71,21 +71,32 @@ function addon:FindMatchingTier(rule, candidates, matcher)
     return nil, candidates
 end
 
-function addon:FilterByStatus(candidates)
-    local highestRank = 0
+-- mergeMainAndAlt: collapses Main (3) and DesignatedAlt (2) to the same effective rank so they
+-- compete equally. Used for non-BiS responses (MS/MU/OS/TM), where status is only meant to gate
+-- "raider on the roster" vs "nil". For BiS, Mains still outrank DesignatedAlts.
+function addon:FilterByStatus(candidates, mergeMainAndAlt)
+    local function effectiveRank(status)
+        local r = util:StatusRank(status)
+        if mergeMainAndAlt and r == 3 then return 2 end
+        return r
+    end
+
+    local highestEffective = 0
     local survivors = {}
+    local highestActual = 0
 
     for _, candidate in ipairs(candidates) do
-        highestRank = math.max(highestRank, util:StatusRank(candidate.status))
+        highestEffective = math.max(highestEffective, effectiveRank(candidate.status))
     end
 
     for _, candidate in ipairs(candidates) do
-        if util:StatusRank(candidate.status) == highestRank then
+        if effectiveRank(candidate.status) == highestEffective then
             survivors[#survivors + 1] = candidate
+            highestActual = math.max(highestActual, util:StatusRank(candidate.status))
         end
     end
 
-    return survivors, highestRank
+    return survivors, highestActual
 end
 
 function addon:RollCandidates(candidates, rollAssignments)
@@ -144,15 +155,6 @@ local RESULT_RESPONSE_GROUPS = {
     { key = "tm", label = "TM Rollers:" },
 }
 
-local RESPONSE_PRIORITY_RANKS = {
-    bis = 6,
-    ms = 5,
-    mu = 4,
-    os = 3,
-    tm = 2,
-    pass = 1,
-}
-
 local function rollerSortValue(candidate)
     if candidate.auto or candidate.rollText == "AUTO" then
         return 101
@@ -206,30 +208,6 @@ local function appendGroupedRollers(lines, candidates)
     if renderedGroups > 0 then
         lines[#lines + 1] = ""
     end
-end
-
-function addon:FilterByResponsePriority(candidates)
-    local highestRank = 0
-    local survivors = {}
-    local highestKey = "pass"
-
-    for _, candidate in ipairs(candidates or {}) do
-        local responseKey = candidate.responseType or "pass"
-        local responseRank = RESPONSE_PRIORITY_RANKS[responseKey] or 0
-        if responseRank > highestRank then
-            highestRank = responseRank
-            highestKey = responseKey
-        end
-    end
-
-    for _, candidate in ipairs(candidates or {}) do
-        local responseKey = candidate.responseType or "pass"
-        if (RESPONSE_PRIORITY_RANKS[responseKey] or 0) == highestRank then
-            survivors[#survivors + 1] = candidate
-        end
-    end
-
-    return survivors, highestKey, highestRank
 end
 
 function addon:IsCandidateNamedForItem(namedRule, candidateName)
@@ -446,30 +424,53 @@ function addon:SelectWinningRolls(rolls, quantity)
     return winners
 end
 
-function addon:CollectPriorityWinnerCandidates(rule, candidates, matcher, quantity, allRollByName)
+local function effectiveStatusRank(status, mergeMainAndAlt)
+    local r = util:StatusRank(status)
+    if mergeMainAndAlt and r == 3 then return 2 end
+    return r
+end
+
+function addon:CollectPriorityWinnerCandidates(rule, candidates, matcher, quantity, allRollByName, mergeMainAndAlt)
     local orderedCandidates = {}
     local chosen = {}
     local maxCount = quantity or 1
 
+    local function rollOf(name)
+        local rec = allRollByName[util:NormalizeKey(name)]
+        return rec and rec.roll or 0
+    end
+
+    -- Within a spec tier, walk status tiers (Main → DesAlt → nil) for BiS, or (Main+DesAlt → nil)
+    -- for non-BiS. A 2x BiS lot with one Main and one DesAlt roller awards the first copy to the
+    -- Main and the second to the DesAlt; previously FilterByStatus dropped the DesAlt entirely.
     local function appendSortedCandidates(tierCandidates)
-        local statusSurvivors = self:FilterByStatus(tierCandidates)
+        local groups = {}
+        for _, candidate in ipairs(tierCandidates) do
+            local rank = effectiveStatusRank(candidate.status, mergeMainAndAlt)
+            groups[rank] = groups[rank] or {}
+            groups[rank][#groups[rank] + 1] = candidate
+        end
 
-        table.sort(statusSurvivors, function(left, right)
-            local leftRoll = allRollByName[util:NormalizeKey(left.name)] and allRollByName[util:NormalizeKey(left.name)].roll or 0
-            local rightRoll = allRollByName[util:NormalizeKey(right.name)] and allRollByName[util:NormalizeKey(right.name)].roll or 0
-            if leftRoll == rightRoll then
-                return string.lower(left.name or "") < string.lower(right.name or "")
-            end
-            return leftRoll > rightRoll
-        end)
-
-        for _, candidate in ipairs(statusSurvivors) do
-            local candidateKey = util:NormalizeKey(candidate.name)
-            if not chosen[candidateKey] then
-                orderedCandidates[#orderedCandidates + 1] = candidate
-                chosen[candidateKey] = true
-                if #orderedCandidates >= maxCount then
-                    return true
+        for _, statusRank in ipairs({ 3, 2, 1 }) do
+            local group = groups[statusRank]
+            if group then
+                table.sort(group, function(left, right)
+                    local leftRoll = rollOf(left.name)
+                    local rightRoll = rollOf(right.name)
+                    if leftRoll == rightRoll then
+                        return string.lower(left.name or "") < string.lower(right.name or "")
+                    end
+                    return leftRoll > rightRoll
+                end)
+                for _, candidate in ipairs(group) do
+                    local candidateKey = util:NormalizeKey(candidate.name)
+                    if not chosen[candidateKey] then
+                        orderedCandidates[#orderedCandidates + 1] = candidate
+                        chosen[candidateKey] = true
+                        if #orderedCandidates >= maxCount then
+                            return true
+                        end
+                    end
                 end
             end
         end
@@ -587,74 +588,105 @@ end
 -- result record. Does NOT lock or append -- the caller does that.
 -- Resolve one lot. `lot` is a LootCore lot: identity is lot.itemId, count is lot.count, and
 -- the responses live on lot.responses. Display fields are rendered from itemId on demand.
+-- Response tiers in priority order. "pass" is intentionally absent: passers don't win.
+local RESPONSE_TIER_ORDER = { "bis", "ms", "mu", "os", "tm" }
+
+local function rollersForResponseType(rollers, responseType)
+    local out = {}
+    for _, roller in ipairs(rollers) do
+        if (roller.responseType or "pass") == responseType then
+            out[#out + 1] = roller
+        end
+    end
+    return out
+end
+
+local function topResponseTierRollers(rollers)
+    for _, key in ipairs(RESPONSE_TIER_ORDER) do
+        local tierRollers = rollersForResponseType(rollers, key)
+        if #tierRollers > 0 then
+            return key, tierRollers
+        end
+    end
+    return nil, {}
+end
+
 function addon:ResolveSessionItem(lot)
-    local record
-        local _name, _link, _icon = util:ItemRender(lot.itemId)
-        local item = {
-            id = lot.id,
-            itemId = lot.itemId,
-            name = _name or ("item:" .. tostring(lot.itemId)),
-            link = _link,
-            icon = _icon,
-            quantity = lot.count or 1,
+    local _name, _link, _icon = util:ItemRender(lot.itemId)
+    local item = {
+        id = lot.id,
+        itemId = lot.itemId,
+        name = _name or ("item:" .. tostring(lot.itemId)),
+        link = _link,
+        icon = _icon,
+        quantity = lot.count or 1,
+    }
+    local rollers = self:BuildRollerList(lot)
+    local allRollerNames = {}
+    local allRollerDetails = {}
+    local namedRule = self:GetNamedRule(item.name)
+    for _, roller in ipairs(rollers) do
+        allRollerNames[#allRollerNames + 1] = roller.name
+        allRollerDetails[#allRollerDetails + 1] = {
+            name = roller.name,
+            className = roller.className,
+            specName = roller.specName,
+            status = roller.status,
+            responseType = roller.responseType,
+            isNamed = self:IsCandidateNamedForItem(namedRule, roller.name),
         }
-        local rollers = self:BuildRollerList(lot)
-        local allRollerNames = {}
-        local allRollerDetails = {}
-        local namedRule = self:GetNamedRule(item.name)
-        for _, roller in ipairs(rollers) do
-            allRollerNames[#allRollerNames + 1] = roller.name
-            allRollerDetails[#allRollerDetails + 1] = {
-                name = roller.name,
-                className = roller.className,
-                specName = roller.specName,
-                status = roller.status,
-                responseType = roller.responseType,
-                isNamed = self:IsCandidateNamedForItem(namedRule, roller.name),
-            }
-        end
+    end
 
-        local allRolls = self:RollCandidates(rollers, item.liveRollAssignments)
-        local allRollByName = {}
-        for _, roll in ipairs(allRolls) do
-            allRollByName[util:NormalizeKey(roll.name)] = roll
-        end
-        for _, detail in ipairs(allRollerDetails) do
-            local matchedRoll = allRollByName[util:NormalizeKey(detail.name)]
-            detail.rollText = matchedRoll and (matchedRoll.auto and "AUTO" or tostring(matchedRoll.roll)) or nil
-        end
-        local lootRule = self:GetLootRule(item.name)
-        local defaultSpecPriorityText = lootRule and lootRule.raw or (self:RuleHasLootCouncil(namedRule) and "LC" or nil)
-        local responsePriorityCandidates = self:FilterByResponsePriority(rollers)
+    local allRolls = self:RollCandidates(rollers, item.liveRollAssignments)
+    local allRollByName = {}
+    for _, roll in ipairs(allRolls) do
+        allRollByName[util:NormalizeKey(roll.name)] = roll
+    end
+    for _, detail in ipairs(allRollerDetails) do
+        local matchedRoll = allRollByName[util:NormalizeKey(detail.name)]
+        detail.rollText = matchedRoll and (matchedRoll.auto and "AUTO" or tostring(matchedRoll.roll)) or nil
+    end
+    local lootRule = self:GetLootRule(item.name)
+    local defaultSpecPriorityText = lootRule and lootRule.raw or (self:RuleHasLootCouncil(namedRule) and "LC" or nil)
 
-        local namedTier, prioritized, isLootCouncil = self:FindMatchingNamedTier(namedRule, responsePriorityCandidates)
+    local specMatcher = function(entry, candidate)
+        local keyA = util:NormalizeKey((candidate.className or "") .. " " .. (candidate.specName or ""))
+        local keyB = util:NormalizeKey((candidate.specName or "") .. " " .. (candidate.className or ""))
+        for _, key in ipairs(entry.matchKeys or {}) do
+            if key ~= "" and (key == keyA or key == keyB) then
+                return true
+            end
+        end
+        return false
+    end
+    local namedMatcher = function(entry, candidate)
+        return entry.playerKey == util:NormalizeKey(candidate.name)
+    end
 
+    -- LC short-circuits the whole item. Original semantics: LC is decided against the highest
+    -- response tier with any rollers -- if none of its rollers match a named entry, the named
+    -- rule's "rest" position falls through to LC and the council picks every copy.
+    local topKey, topRollers = topResponseTierRollers(rollers)
+    if topKey then
+        local mergeMainAndAlt = topKey ~= "bis"
+        local _, prioritized, isLootCouncil = self:FindMatchingNamedTier(namedRule, topRollers)
         if isLootCouncil then
             local councilCandidates = prioritized
-            local prioritizedNames = {}
-            local rank = 0
             local displaySpecPriorityText = defaultSpecPriorityText or "LC"
 
             if lootRule then
-                local lootTier
-                lootTier, councilCandidates = self:FindMatchingTier(lootRule, councilCandidates, function(entry, candidate)
-                    local keyA = util:NormalizeKey((candidate.className or "") .. " " .. (candidate.specName or ""))
-                    local keyB = util:NormalizeKey((candidate.specName or "") .. " " .. (candidate.className or ""))
-                    for _, key in ipairs(entry.matchKeys or {}) do
-                        if key ~= "" and (key == keyA or key == keyB) then
-                            return true
-                        end
-                    end
-                    return false
-                end)
+                local _, filtered = self:FindMatchingTier(lootRule, councilCandidates, specMatcher)
+                councilCandidates = filtered
             end
 
-            councilCandidates, rank = self:FilterByStatus(councilCandidates)
+            local rank
+            councilCandidates, rank = self:FilterByStatus(councilCandidates, mergeMainAndAlt)
+            local prioritizedNames = {}
             for _, player in ipairs(councilCandidates) do
                 prioritizedNames[#prioritizedNames + 1] = player.name
             end
 
-            record = self:BuildLootCouncilResultRecord(
+            return self:BuildLootCouncilResultRecord(
                 item,
                 allRollerNames,
                 allRollerDetails,
@@ -663,69 +695,103 @@ function addon:ResolveSessionItem(lot)
                 rank,
                 prioritizedNames
             )
-        elseif not namedTier and lootRule then
-            local lootTier
-            lootTier, prioritized = self:FindMatchingTier(lootRule, prioritized, function(entry, candidate)
-                local keyA = util:NormalizeKey((candidate.className or "") .. " " .. (candidate.specName or ""))
-                local keyB = util:NormalizeKey((candidate.specName or "") .. " " .. (candidate.className or ""))
-                for _, key in ipairs(entry.matchKeys or {}) do
-                    if key ~= "" and (key == keyA or key == keyB) then
-                        return true
-                    end
-                end
-                return false
+        end
+    end
+
+    -- Non-LC path: walk response tiers in priority order, accumulating winners until the lot's
+    -- quantity is met. A 2x lot with one MS roller and one OS roller awards one copy to each;
+    -- previously the lower tier was discarded entirely by FilterByResponsePriority.
+    local quantity = item.quantity or 1
+    local winnerDetails = {}
+    local rollDetails = {}
+    local prioritizedNames = {}
+    local rolls = {}
+    local seenSurvivor = {}
+    local rank = 0
+    local firstNamedTier = nil
+
+    for _, responseKey in ipairs(RESPONSE_TIER_ORDER) do
+        if #winnerDetails >= quantity then break end
+
+        local tierRollers = rollersForResponseType(rollers, responseKey)
+        if #tierRollers > 0 then
+            local mergeMainAndAlt = responseKey ~= "bis"
+            -- isLootCouncil at non-top tiers is ignored: LC was decided above. A lower tier
+            -- whose rollers didn't match the named rule simply gets treated as spec-tier rollers.
+            local namedTier, prioritized = self:FindMatchingNamedTier(namedRule, tierRollers)
+
+            if namedTier and firstNamedTier == nil then
+                firstNamedTier = namedTier
+            end
+
+            local activeRule, activeMatcher
+            if namedTier then
+                activeRule, activeMatcher = namedRule, namedMatcher
+            elseif lootRule then
+                local _, filtered = self:FindMatchingTier(lootRule, prioritized, specMatcher)
+                prioritized = filtered
+                activeRule, activeMatcher = lootRule, specMatcher
+            end
+
+            -- Show every spec-survivor in priority order. Status fall-through means a Main beats
+            -- a DesAlt for BiS but the DesAlt can still claim a second copy, so both belong in
+            -- "Prioritized Rolls" even though only the Main wins for 1x.
+            local statusSorted = {}
+            for _, p in ipairs(prioritized) do statusSorted[#statusSorted + 1] = p end
+            table.sort(statusSorted, function(left, right)
+                local leftRank = effectiveStatusRank(left.status, mergeMainAndAlt)
+                local rightRank = effectiveStatusRank(right.status, mergeMainAndAlt)
+                if leftRank ~= rightRank then return leftRank > rightRank end
+                local leftKey = util:NormalizeKey(left.name)
+                local rightKey = util:NormalizeKey(right.name)
+                local leftRoll = allRollByName[leftKey] and allRollByName[leftKey].roll or 0
+                local rightRoll = allRollByName[rightKey] and allRollByName[rightKey].roll or 0
+                if leftRoll ~= rightRoll then return leftRoll > rightRoll end
+                return string.lower(left.name or "") < string.lower(right.name or "")
             end)
 
-            local statusSurvivors, rank = self:FilterByStatus(prioritized)
-            local rolls = {}
-            local prioritizedNames = {}
-            local rollDetails = {}
-            local survivorByName = {}
-            for _, player in ipairs(statusSurvivors) do
-                prioritizedNames[#prioritizedNames + 1] = player.name
-                survivorByName[util:NormalizeKey(player.name)] = player
-                local matchedRoll = allRollByName[util:NormalizeKey(player.name)]
-                if matchedRoll then
-                    rolls[#rolls + 1] = {
-                        name = matchedRoll.name,
-                        roll = matchedRoll.roll,
-                        auto = matchedRoll.auto,
+            for _, player in ipairs(statusSorted) do
+                local actual = util:StatusRank(player.status)
+                if actual > rank then rank = actual end
+                local key = util:NormalizeKey(player.name)
+                if not seenSurvivor[key] then
+                    seenSurvivor[key] = true
+                    prioritizedNames[#prioritizedNames + 1] = player.name
+                    local matchedRoll = allRollByName[key]
+                    if matchedRoll then
+                        rolls[#rolls + 1] = {
+                            name = matchedRoll.name,
+                            roll = matchedRoll.roll,
+                            auto = matchedRoll.auto,
+                        }
+                    end
+                    rollDetails[#rollDetails + 1] = {
+                        name = player.name,
+                        className = player.className,
+                        specName = player.specName,
+                        status = player.status,
+                        roll = matchedRoll and matchedRoll.roll or nil,
+                        auto = matchedRoll and matchedRoll.auto or false,
+                        isNamed = self:IsCandidateNamedForItem(namedRule, player.name),
                     }
                 end
             end
-            sortRollsDescending(rolls)
-            for _, roller in ipairs(statusSurvivors) do
-                local matchedRoll = allRollByName[util:NormalizeKey(roller.name)]
-                rollDetails[#rollDetails + 1] = {
-                    name = roller.name,
-                    className = roller.className,
-                    specName = roller.specName,
-                    status = roller.status,
-                    roll = matchedRoll and matchedRoll.roll or nil,
-                    auto = matchedRoll and matchedRoll.auto or false,
-                    isNamed = self:IsCandidateNamedForItem(namedRule, roller.name),
-                }
+
+            local remaining = quantity - #winnerDetails
+            local tierWinnerCandidates = {}
+            if activeRule then
+                tierWinnerCandidates = self:CollectPriorityWinnerCandidates(activeRule, tierRollers, activeMatcher, remaining, allRollByName, mergeMainAndAlt)
             end
-            local winnerDetails = {}
-            local winnerCandidates = self:CollectPriorityWinnerCandidates(lootRule, responsePriorityCandidates, function(entry, candidate)
-                local keyA = util:NormalizeKey((candidate.className or "") .. " " .. (candidate.specName or ""))
-                local keyB = util:NormalizeKey((candidate.specName or "") .. " " .. (candidate.className or ""))
-                for _, key in ipairs(entry.matchKeys or {}) do
-                    if key ~= "" and (key == keyA or key == keyB) then
-                        return true
-                    end
-                end
-                return false
-            end, item.quantity or 1, allRollByName)
-            if #winnerCandidates == 0 then
-                for _, winnerName in ipairs(self:SelectWinningRolls(rolls, item.quantity or 1)) do
-                    local winnerCandidate = survivorByName[util:NormalizeKey(winnerName)]
-                    if winnerCandidate then
-                        winnerCandidates[#winnerCandidates + 1] = winnerCandidate
-                    end
+            if #tierWinnerCandidates == 0 then
+                -- No-rule fallback: pick by (status desc, roll desc). The sorted display order
+                -- already encodes that priority, so the top N entries are the next N winners.
+                for index = 1, math.min(remaining, #statusSorted) do
+                    tierWinnerCandidates[#tierWinnerCandidates + 1] = statusSorted[index]
                 end
             end
-            for _, winnerCandidate in ipairs(winnerCandidates) do
+
+            for _, winnerCandidate in ipairs(tierWinnerCandidates) do
+                if #winnerDetails >= quantity then break end
                 local winnerName = winnerCandidate.name
                 local matchedRoll = allRollByName[util:NormalizeKey(winnerName)]
                 winnerDetails[#winnerDetails + 1] = {
@@ -736,91 +802,23 @@ function addon:ResolveSessionItem(lot)
                     isNamed = self:IsCandidateNamedForItem(namedRule, winnerName),
                 }
             end
-
-            record = self:BuildResultRecord(
-                item,
-                allRollerNames,
-                allRollerDetails,
-                namedTier and namedTier.raw or nil,
-                defaultSpecPriorityText,
-                rank,
-                prioritizedNames,
-                rolls,
-                rollDetails,
-                winnerDetails
-            )
-        else
-            local statusSurvivors, rank = self:FilterByStatus(prioritized)
-            local rolls = {}
-            local prioritizedNames = {}
-            local rollDetails = {}
-            local survivorByName = {}
-            for _, player in ipairs(statusSurvivors) do
-                prioritizedNames[#prioritizedNames + 1] = player.name
-                survivorByName[util:NormalizeKey(player.name)] = player
-                local matchedRoll = allRollByName[util:NormalizeKey(player.name)]
-                if matchedRoll then
-                    rolls[#rolls + 1] = {
-                        name = matchedRoll.name,
-                        roll = matchedRoll.roll,
-                        auto = matchedRoll.auto,
-                    }
-                end
-            end
-            sortRollsDescending(rolls)
-            for _, roller in ipairs(statusSurvivors) do
-                local matchedRoll = allRollByName[util:NormalizeKey(roller.name)]
-                rollDetails[#rollDetails + 1] = {
-                    name = roller.name,
-                    className = roller.className,
-                    specName = roller.specName,
-                    status = roller.status,
-                    roll = matchedRoll and matchedRoll.roll or nil,
-                    auto = matchedRoll and matchedRoll.auto or false,
-                    isNamed = self:IsCandidateNamedForItem(namedRule, roller.name),
-                }
-            end
-            local winnerDetails = {}
-            local winnerCandidates
-            if namedTier and namedRule then
-                winnerCandidates = self:CollectPriorityWinnerCandidates(namedRule, responsePriorityCandidates, function(entry, candidate)
-                    return entry.playerKey == util:NormalizeKey(candidate.name)
-                end, item.quantity or 1, allRollByName)
-            else
-                winnerCandidates = {}
-                for _, winnerName in ipairs(self:SelectWinningRolls(rolls, item.quantity or 1)) do
-                    local winnerCandidate = survivorByName[util:NormalizeKey(winnerName)]
-                    if winnerCandidate then
-                        winnerCandidates[#winnerCandidates + 1] = winnerCandidate
-                    end
-                end
-            end
-            for _, winnerCandidate in ipairs(winnerCandidates) do
-                local winnerName = winnerCandidate.name
-                local matchedRoll = allRollByName[util:NormalizeKey(winnerName)]
-                winnerDetails[#winnerDetails + 1] = {
-                    name = winnerName,
-                    className = winnerCandidate.className,
-                    roll = matchedRoll and matchedRoll.roll or nil,
-                    auto = matchedRoll and matchedRoll.auto or false,
-                    isNamed = self:IsCandidateNamedForItem(namedRule, winnerName),
-                }
-            end
-
-            record = self:BuildResultRecord(
-                item,
-                allRollerNames,
-                allRollerDetails,
-                namedTier and namedTier.raw or nil,
-                defaultSpecPriorityText,
-                rank,
-                prioritizedNames,
-                rolls,
-                rollDetails,
-                winnerDetails
-            )
         end
-    return record
+    end
+
+    sortRollsDescending(rolls)
+
+    return self:BuildResultRecord(
+        item,
+        allRollerNames,
+        allRollerDetails,
+        firstNamedTier and firstNamedTier.raw or nil,
+        defaultSpecPriorityText,
+        rank,
+        prioritizedNames,
+        rolls,
+        rollDetails,
+        winnerDetails
+    )
 end
 
 -- ProcessLoot (the "Start Rolls" button): kick off live rolls in batches. The first
