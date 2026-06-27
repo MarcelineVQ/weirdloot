@@ -560,9 +560,11 @@ function addon:BuildBottomTabs()
     self.ui.versionLabel = versionLabel
 end
 
-function addon:SelectTab(tabKey)
+-- transient = show the tab without remembering it as the last-used tab (for the owed-loot minimap
+-- jump, which must not overwrite the user's real last tab).
+function addon:SelectTab(tabKey, transient)
     self.ui.selectedTab = tabKey
-    self.db.ui.selectedTab = tabKey
+    if not transient then self.db.ui.selectedTab = tabKey end
 
     for key, panel in pairs(self.ui.panels) do
         if key == tabKey then
@@ -1350,6 +1352,12 @@ function addon:BuildResultsTab()
     -- lower third of the panel as empty backdrop.
     local list = createScrollList(panel, "WeirdLootResultsList", 21, function(row)
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+        -- Tinted when the local player is among the winners (set in RefreshResultsTab). Behind the
+        -- content so the item link / "You" text read on top.
+        row.bg = row:CreateTexture(nil, "BACKGROUND")
+        row.bg:SetAllPoints(row)
+        row.bg:SetTexture(0, 0, 0, 0)
 
         row.icon = row:CreateTexture(nil, "ARTWORK")
         row.icon:SetWidth(18)
@@ -2374,6 +2382,34 @@ function addon:RefreshOptionsTab()
     end
 end
 
+-- Circular sparkle orbit for the "loot owed to you" minimap glow. Self-contained (no AutoCastShine,
+-- which orbits the square button edge, and no WeakAuras/LibCustomGlow, whose sparkle path is also
+-- rectangular and whose texture ships under the WeakAuras addon). We place N sparkles on a CIRCLE via
+-- cos/sin and spin the ring; each sparkle twinkles in size/alpha. Sparkle art is the Blizzard autocast
+-- shine sub-region of UI-ItemSockets, always present.
+local SHINE_TEXTURE = "Interface\\ItemSocketingFrame\\UI-ItemSockets"
+local SHINE_TCOORD  = { 0.3984375, 0.4453125, 0.40234375, 0.44921875 }
+local SHINE_COUNT   = 10
+local SHINE_COLOR   = { 0.95, 0.9, 0.35 }   -- warm gold ("loot")
+local SHINE_REV_PER_SEC = 0.32              -- ring spin speed
+local TWO_PI = math.pi * 2
+
+local function shineOnUpdate(shine, elapsed)
+    shine.angle = (shine.angle + elapsed * SHINE_REV_PER_SEC * TWO_PI) % TWO_PI
+    local radius = (shine:GetWidth() or 31) / 2 + 1
+    local now = (GetTime and GetTime()) or 0
+    local n = #shine.sparkles
+    for i = 1, n do
+        local a = shine.angle + (i - 1) * (TWO_PI / n)
+        local s = shine.sparkles[i]
+        s:SetPoint("CENTER", shine, "CENTER", math.cos(a) * radius, math.sin(a) * radius)
+        local tw = 0.5 + 0.5 * math.sin(now * 3 + i)   -- per-sparkle twinkle
+        s:SetAlpha(0.35 + 0.65 * tw)
+        local sz = 7 + 4 * tw
+        s:SetWidth(sz); s:SetHeight(sz)
+    end
+end
+
 local function positionMinimapButton(button)
     local opt = getOptions(addon)
     local angle = tonumber(opt.minimapButtonAngle) or 200
@@ -2395,7 +2431,7 @@ function addon:BuildMinimapButton()
     button:SetWidth(31)
     button:SetHeight(31)
     button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-    button:RegisterForDrag("LeftButton")
+    button:RegisterForDrag("RightButton")    -- left-click toggles the window; only a right-drag repositions
     button:SetMovable(true)
 
     local overlay = button:CreateTexture(nil, "OVERLAY")
@@ -2417,14 +2453,38 @@ function addon:BuildMinimapButton()
     highlight:SetAllPoints(button)
 
     button:SetScript("OnClick", function()
+        -- Opening with loot owed jumps straight to Loot Results; otherwise open the last-used tab as
+        -- normal. Read the remembered tab (db) for the non-owed case so a prior owed jump (which uses a
+        -- transient select) never becomes the "last" tab.
+        if not (addon.ui.frame and addon.ui.frame:IsShown()) then
+            local target = ((addon:CountLootOwedToMe() or 0) > 0) and "results"
+                or (addon.db.ui.selectedTab or "loot")
+            addon:SelectTab(target, true)
+        end
         addon:ToggleMainFrame()
     end)
 
     button:SetScript("OnEnter", function(selfBtn)
-        GameTooltip:SetOwner(selfBtn, "ANCHOR_LEFT")
-        GameTooltip:AddLine("WeirdLoot", 1, 0.82, 0)
+        -- Pin the tooltip's top to the button's bottom-left so a growing owed-items list extends
+        -- DOWNWARD (and to the left, where there's room for a top-right minimap) instead of creeping up.
+        GameTooltip:SetOwner(selfBtn, "ANCHOR_NONE")
+        GameTooltip:ClearAllPoints()
+        GameTooltip:SetPoint("TOPRIGHT", selfBtn, "BOTTOMLEFT", 0, 0)
+        GameTooltip:AddLine("WeirdLoot " .. tostring(addon.version or "?"), 1, 0.82, 0)
         GameTooltip:AddLine("Click to toggle the main window.", 1, 1, 1)
-        GameTooltip:AddLine("Drag to reposition.", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("Right-drag to reposition.", 0.8, 0.8, 0.8)
+
+        local owed = addon:GetLootOwedToMe()
+        if owed and #owed > 0 then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Owed to you:", 1, 0.82, 0)
+            for _, entry in ipairs(owed) do
+                local name, link = GetItemInfo(entry.itemId)
+                local label = link or name or ("item:" .. tostring(entry.itemId))
+                if entry.count > 1 then label = label .. " x" .. entry.count end
+                GameTooltip:AddLine(label, 1, 1, 1)
+            end
+        end
         GameTooltip:Show()
     end)
     button:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -2447,6 +2507,25 @@ function addon:BuildMinimapButton()
     end)
 
     self.ui.minimapButton = button
+    -- "Loot owed to you" indicator: a circular sparkle orbit (see shineOnUpdate), hidden until the
+    -- mirrored ledger shows a copy we won but have not yet received.
+    local shine = CreateFrame("Frame", nil, button)
+    shine:SetAllPoints(button)
+    shine:SetFrameLevel((button:GetFrameLevel() or 0) + 1)
+    shine.angle = 0
+    shine.sparkles = {}
+    for i = 1, SHINE_COUNT do
+        local s = shine:CreateTexture(nil, "OVERLAY")
+        s:SetTexture(SHINE_TEXTURE)
+        s:SetTexCoord(SHINE_TCOORD[1], SHINE_TCOORD[2], SHINE_TCOORD[3], SHINE_TCOORD[4])
+        s:SetBlendMode("ADD")
+        s:SetVertexColor(SHINE_COLOR[1], SHINE_COLOR[2], SHINE_COLOR[3])
+        s:SetWidth(6); s:SetHeight(6)
+        s:Hide()
+        shine.sparkles[i] = s
+    end
+    self.ui.minimapShine = shine
+
     positionMinimapButton(button)
 
     local opt = getOptions(self)
@@ -2455,6 +2534,35 @@ function addon:BuildMinimapButton()
     else
         button:Show()
     end
+    self:UpdateMinimapOwedGlow()
+end
+
+-- Copies the local player has won but not yet received, from the (raider-mirrored) ledger.
+function addon:CountLootOwedToMe()
+    if not self.lootCore then return 0 end
+    return self.lootCore:OwedCountFor(util:GetPlayerName("player"))
+end
+
+-- Aggregated { itemId, count } the local player is owed, for the minimap tooltip.
+function addon:GetLootOwedToMe()
+    if not self.lootCore then return {} end
+    return self.lootCore:OwedItemsFor(util:GetPlayerName("player"))
+end
+
+function addon:SetMinimapOwedGlow(shown)
+    local shine = self.ui and self.ui.minimapShine
+    if not shine then return end
+    if shown then
+        for _, s in ipairs(shine.sparkles) do s:Show() end
+        shine:SetScript("OnUpdate", shineOnUpdate)
+    else
+        shine:SetScript("OnUpdate", nil)
+        for _, s in ipairs(shine.sparkles) do s:Hide() end
+    end
+end
+
+function addon:UpdateMinimapOwedGlow()
+    self:SetMinimapOwedGlow((self:CountLootOwedToMe() or 0) > 0)
 end
 
 function addon:SetMinimapButtonShown(shown)
@@ -2467,6 +2575,7 @@ function addon:SetMinimapButtonShown(shown)
 end
 
 function addon:RefreshUI()
+    self:UpdateMinimapOwedGlow()
     if not self.ui or not self.ui.frame then
         return
     end
@@ -2728,6 +2837,17 @@ function addon:RefreshResultsTab()
             itemText = string.format("%s x%d", itemText, result.quantity)
         end
         row.name:SetText(itemText)
+        -- Tint the row when YOU won a copy: an indigo-teal that bridges the epic-purple item link and
+        -- the aqua "You" without washing either out.
+        local iWon = false
+        for _, winnerName in ipairs(result.winners or {}) do
+            if util:IsSelfName(winnerName) then iWon = true break end
+        end
+        if iWon then
+            row.bg:SetTexture(0.04, 0.12, 0.17, 0.42)
+        else
+            row.bg:SetTexture(0, 0, 0, 0)
+        end
         if result.winners and #result.winners > 0 and result.winnerDetails and #result.winnerDetails > 0 then
             local winnerParts = {}
             for winnerIndex, winnerName in ipairs(result.winners) do

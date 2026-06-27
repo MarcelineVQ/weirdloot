@@ -558,6 +558,50 @@ function LootCore:State(id) local l = self.lots[id]; return l and l.state or nil
 function LootCore:IsResolved(id) local l = self.lots[id]; return l ~= nil and l.state == STATE.RESOLVED end
 function LootCore:LiveCount(id) local l = self.lots[id]; return l and liveCount(l) or 0 end
 
+-- How many copies this player has WON but not yet received (state OWED). Drives the "you are owed
+-- loot" minimap indicator; works on a raider's mirrored ledger since per-copy winner/state ride the wire.
+function LootCore:OwedCountFor(player)
+    if not player then return 0 end
+    local n = 0
+    for i = 1, #self.order do
+        local lot = self.lots[self.order[i]]
+        if lot and lot.awards then
+            for idx = 1, #lot.awards do
+                local a = lot.awards[idx]
+                if a.state == AWARD.OWED and a.winner == player then
+                    n = n + 1
+                end
+            end
+        end
+    end
+    return n
+end
+
+-- The distinct items this player is owed, aggregated as { {itemId=, count=}, ... } in lot order.
+-- Used to list owed loot in the minimap tooltip; the link/name is rendered locally from itemId.
+function LootCore:OwedItemsFor(player)
+    if not player then return {} end
+    local out, index = {}, {}
+    for i = 1, #self.order do
+        local lot = self.lots[self.order[i]]
+        if lot and lot.awards then
+            for idx = 1, #lot.awards do
+                local a = lot.awards[idx]
+                if a.state == AWARD.OWED and a.winner == player then
+                    local id = lot.itemId
+                    if index[id] then
+                        out[index[id]].count = out[index[id]].count + 1
+                    else
+                        out[#out + 1] = { itemId = id, count = 1 }
+                        index[id] = #out
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
 function LootCore:List() -- live lots, mint order (the loot-tab projection)
     local out = {}
     for i = 1, #self.order do
