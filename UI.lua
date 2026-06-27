@@ -2425,6 +2425,18 @@ function addon:BuildMinimapButton()
         GameTooltip:AddLine("WeirdLoot " .. tostring(addon.version or "?"), 1, 0.82, 0)
         GameTooltip:AddLine("Click to toggle the main window.", 1, 1, 1)
         GameTooltip:AddLine("Right-drag to reposition.", 0.8, 0.8, 0.8)
+
+        local owed = addon:GetLootOwedToMe()
+        if owed and #owed > 0 then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("Owed to you:", 1, 0.82, 0)
+            for _, entry in ipairs(owed) do
+                local name, link = GetItemInfo(entry.itemId)
+                local label = link or name or ("item:" .. tostring(entry.itemId))
+                if entry.count > 1 then label = label .. " x" .. entry.count end
+                GameTooltip:AddLine(label, 1, 1, 1)
+            end
+        end
         GameTooltip:Show()
     end)
     button:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -2447,6 +2459,14 @@ function addon:BuildMinimapButton()
     end)
 
     self.ui.minimapButton = button
+    -- "Loot owed to you" indicator: the pet-autocast radial sparkle (AutoCastShine, native to 3.3.5a)
+    -- orbiting the button. Hidden until the mirrored ledger shows a copy we won but have not received.
+    local shine = CreateFrame("Frame", "WeirdLootMinimapShine", button, "AutoCastShineTemplate")
+    shine:SetAllPoints(button)
+    shine:SetFrameLevel((button:GetFrameLevel() or 0) + 1)
+    self.ui.minimapShine = shine
+    if AutoCastShine_AutoCastStop then AutoCastShine_AutoCastStop(shine) end
+
     positionMinimapButton(button)
 
     local opt = getOptions(self)
@@ -2455,6 +2475,37 @@ function addon:BuildMinimapButton()
     else
         button:Show()
     end
+    self:UpdateMinimapOwedGlow()
+end
+
+-- Copies the local player has won but not yet received, from the (raider-mirrored) ledger.
+function addon:CountLootOwedToMe()
+    if not self.lootCore then return 0 end
+    return self.lootCore:OwedCountFor(util:GetPlayerName("player"))
+end
+
+-- Aggregated { itemId, count } the local player is owed, for the minimap tooltip.
+function addon:GetLootOwedToMe()
+    if not self.lootCore then return {} end
+    return self.lootCore:OwedItemsFor(util:GetPlayerName("player"))
+end
+
+function addon:SetMinimapOwedGlow(shown)
+    local shine = self.ui and self.ui.minimapShine
+    if not shine then return end
+    -- AutoCastShineTemplate only self-drives OnLoad; its animation runs from AutoCastShine_OnUpdate
+    -- (which orbits every shine in the shared global table). Drive it ourselves only while glowing.
+    if shown and AutoCastShine_AutoCastStart then
+        AutoCastShine_AutoCastStart(shine)
+        shine:SetScript("OnUpdate", function(s, elapsed) AutoCastShine_OnUpdate(s, elapsed) end)
+    else
+        if AutoCastShine_AutoCastStop then AutoCastShine_AutoCastStop(shine) end
+        shine:SetScript("OnUpdate", nil)
+    end
+end
+
+function addon:UpdateMinimapOwedGlow()
+    self:SetMinimapOwedGlow((self:CountLootOwedToMe() or 0) > 0)
 end
 
 function addon:SetMinimapButtonShown(shown)
@@ -2467,6 +2518,7 @@ function addon:SetMinimapButtonShown(shown)
 end
 
 function addon:RefreshUI()
+    self:UpdateMinimapOwedGlow()
     if not self.ui or not self.ui.frame then
         return
     end
