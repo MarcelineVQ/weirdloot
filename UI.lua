@@ -2422,7 +2422,7 @@ function addon:BuildMinimapButton()
 
     button:SetScript("OnEnter", function(selfBtn)
         GameTooltip:SetOwner(selfBtn, "ANCHOR_LEFT")
-        GameTooltip:AddLine("WeirdLoot", 1, 0.82, 0)
+        GameTooltip:AddLine("WeirdLoot " .. tostring(addon.version or "?"), 1, 0.82, 0)
         GameTooltip:AddLine("Click to toggle the main window.", 1, 1, 1)
         GameTooltip:AddLine("Drag to reposition.", 0.8, 0.8, 0.8)
         GameTooltip:Show()
