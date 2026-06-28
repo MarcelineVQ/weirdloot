@@ -426,7 +426,7 @@ self.ADDON_FILES = {
 -- UI is normally omitted (heavy FrameXML, irrelevant to loot accounting), but the UI-load smoke
 -- suite loads it into the same mocked env to prove it loads + InitializeUI runs. Keep this list in
 -- the toc's UI load order; when UI.lua is split into UI/<tab>.lua files, list them all here.
-self.UI_FILES = { "UI.lua", "UI/Export.lua", "UI/Minimap.lua", "UI/RaidersTab.lua", "UI/ResultsTab.lua", "UI/MasterTab.lua" }
+self.UI_FILES = { "UI.lua", "UI/Export.lua", "UI/Minimap.lua", "UI/RaidersTab.lua", "UI/ResultsTab.lua", "UI/MasterTab.lua", "UI/OptionsTab.lua" }
 
 function self.loadUI(w)
     for _, path in ipairs(self.UI_FILES) do
