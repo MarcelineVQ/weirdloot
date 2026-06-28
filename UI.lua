@@ -2447,7 +2447,7 @@ function addon:BuildMinimapButton()
     button:SetWidth(31)
     button:SetHeight(31)
     button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-    button:RegisterForDrag("RightButton")    -- left-click toggles the window; only a right-drag repositions
+    button:RegisterForDrag("RightButton")    -- left-click trades (when owed) else toggles; right-click toggles; right-drag repositions
     button:SetMovable(true)
 
     local overlay = button:CreateTexture(nil, "OVERLAY")
@@ -2468,10 +2468,33 @@ function addon:BuildMinimapButton()
     highlight:SetBlendMode("ADD")
     highlight:SetAllPoints(button)
 
-    button:SetScript("OnClick", function()
-        -- Opening with loot owed jumps straight to Loot Results; otherwise open the last-used tab as
-        -- normal. Read the remembered tab (db) for the non-owed case so a prior owed jump (which uses a
-        -- transient select) never becomes the "last" tab.
+    button:SetScript("OnClick", function(_, mouseButton)
+        -- Owed raiders: a LEFT-click drives the whole delivery in two presses and never opens the window
+        -- (use a right-click for that). First press opens the trade with the loot master (their side
+        -- auto-fills the owed loot); a second press, once the trade window is up, ACCEPTS it. AcceptTrade
+        -- needs a hardware event -- an OnClick is one -- so the second minimap click completes the trade
+        -- where a timer never could. We can't target by name on 3.3.5a, but InitiateTrade takes a unit
+        -- (the ML's loot-method unit). The ML never gets this path (they hold the loot).
+        if mouseButton == "LeftButton"
+           and not addon:IsAuthorizedLootMaster() and (addon:CountLootOwedToMe() or 0) > 0 then
+            if TradeFrame and TradeFrame:IsShown() then
+                -- only accept when the open trade is actually with the ML, so the loot button never
+                -- accidentally confirms some other trade.
+                if util:NormalizeKey(UnitName("NPC") or "") == util:NormalizeKey(addon:GetLootMasterName() or "") then
+                    AcceptTrade()
+                end
+            else
+                local mlUnit = addon:GetLootMasterUnit()
+                if mlUnit and CheckInteractDistance(mlUnit, 2) then   -- 2 = trade range
+                    InitiateTrade(mlUnit)
+                end
+            end
+            return   -- owed left-click is trade-only; do NOT fall through to the window toggle
+        end
+
+        -- Right-click, or a left-click with nothing owed: toggle the window. Opening with loot owed jumps
+        -- straight to Loot Results; otherwise open the last-used tab. Read the remembered tab (db) for the
+        -- non-owed case so a prior owed jump (which uses a transient select) never becomes the "last" tab.
         if not (addon.ui.frame and addon.ui.frame:IsShown()) then
             local target = ((addon:CountLootOwedToMe() or 0) > 0) and "results"
                 or (addon.db.ui.selectedTab or "loot")
@@ -2487,10 +2510,32 @@ function addon:BuildMinimapButton()
         GameTooltip:ClearAllPoints()
         GameTooltip:SetPoint("TOPRIGHT", selfBtn, "BOTTOMLEFT", 0, 0)
         GameTooltip:AddLine("WeirdLoot " .. tostring(addon.version or "?"), 1, 0.82, 0)
-        GameTooltip:AddLine("Click to toggle the main window.", 1, 1, 1)
-        GameTooltip:AddLine("Right-drag to reposition.", 0.8, 0.8, 0.8)
 
         local owed = addon:GetLootOwedToMe()
+        local ml = addon:GetLootMasterName()
+        local canTrade = owed and #owed > 0 and ml and ml ~= "" and not addon:IsAuthorizedLootMaster()
+        if canTrade then
+            -- when owed, the click trades the ML for your loot; show that instead of the toggle/reposition
+            -- hints, for compactness. Color the ML name by their class.
+            local mlName = ml
+            local mlUnit = addon:GetLootMasterUnit()
+            if mlUnit then
+                -- capture UnitClass's 2nd return (the class token) in its own statement; an `and` guard
+                -- here would truncate the multi-return to one value and lose the token.
+                local _, classToken = UnitClass(mlUnit)
+                local c = classToken and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classToken]
+                if c then
+                    mlName = string.format("|cff%02x%02x%02x%s|r",
+                        math.floor(c.r * 255 + 0.5), math.floor(c.g * 255 + 0.5), math.floor(c.b * 255 + 0.5), ml)
+                end
+            end
+            GameTooltip:AddLine("Move near " .. mlName .. " and left-click to trade.", 0.6, 1, 0.6)
+            GameTooltip:AddLine("Press again to accept the trade.", 0.6, 1, 0.6)
+        else
+            GameTooltip:AddLine("Click to toggle the main window.", 1, 1, 1)
+            GameTooltip:AddLine("Right-drag to reposition.", 0.8, 0.8, 0.8)
+        end
+
         if owed and #owed > 0 then
             GameTooltip:AddLine(" ")
             GameTooltip:AddLine("Owed to you:", 1, 0.82, 0)

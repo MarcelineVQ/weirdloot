@@ -244,6 +244,18 @@ function addon:GetLootMasterName()
     return self.roster.lootMasterName
 end
 
+-- The master looter's UNIT token, straight from the loot method. 3.3.5a can't target by name from addon
+-- code (TargetByName removed, TargetUnit protected), but InitiateTrade / UnitClass take a unit, so this
+-- is how we trade or read the ML. nil unless the group is on master loot.
+function addon:GetLootMasterUnit()
+    local method, partyML, raidML = GetLootMethod()
+    if method ~= "master" then return nil end
+    if raidML and raidML > 0 then return "raid" .. raidML end   -- raid: ML's raid index
+    if partyML == 0 then return "player" end                    -- party: 0 means we are the ML
+    if partyML and partyML > 0 then return "party" .. partyML end
+    return nil
+end
+
 function addon:GetPlayerDescriptor(playerName)
     local attendee = self:GetAttendee(playerName) or self:GetRosterProfile(playerName)
     if not attendee then
