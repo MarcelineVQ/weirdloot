@@ -201,6 +201,14 @@ function util:GetPlayerName(unit)
         return nil
     end
 
+    return util:StripRealm(name)
+end
+
+-- Drop the "-RealmName" suffix from a player-realm string ("Bob-Moonrunner" -> "Bob"). Pure:
+-- does not call UnitName. Use when you already have the name in hand (e.g. from
+-- GetRaidRosterInfo / UnitName / chat-message sender) and just want the short form.
+function util:StripRealm(name)
+    if type(name) ~= "string" then return name end
     local shortName = string.match(name, "^[^-]+")
     return shortName or name
 end

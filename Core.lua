@@ -149,16 +149,12 @@ function addon:Print(message)
 end
 
 function addon:GetSessionOwnerKey()
+    -- The two pieces are normalized separately so the format is stable even if the canonical
+    -- form ever shifts (e.g. trimming more chars). util:NormalizeKey is the single normalizer.
+    local util = self.util
     local playerName = UnitName("player") or "unknown"
     local realmName = GetRealmName and GetRealmName() or "realm"
-    local function normalizeKey(value)
-        value = string.lower(value or "")
-        value = string.match(value, "^%s*(.-)%s*$") or ""
-        value = string.gsub(value, "%s+", " ")
-        return value
-    end
-
-    return string.format("%s-%s", normalizeKey(playerName), normalizeKey(realmName))
+    return string.format("%s-%s", util:NormalizeKey(playerName), util:NormalizeKey(realmName))
 end
 
 function addon:RefreshAll()

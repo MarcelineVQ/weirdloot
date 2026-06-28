@@ -1,6 +1,22 @@
 local addon = WeirdLoot
 local util = addon.util
 
+-- Module-local helpers used by FilterByStatus (defined here so the function-local upvalue
+-- exists by the time FilterByStatus' body executes).
+local function effectiveStatusRank(status, mergeMainAndAlt)
+    local r = util:StatusRank(status)
+    if mergeMainAndAlt and r == 3 then return 2 end
+    return r
+end
+
+-- Human-readable label for a status rank: 3 -> "Main", 2 -> "Designated Alt", else "Nil".
+-- "Nil" (not "Unknown") is the wording the result record + log have always used for rank 1.
+local function statusTierTextForRank(rank)
+    if rank == 3 then return "Main" end
+    if rank == 2 then return "Designated Alt" end
+    return "Nil"
+end
+
 function addon:InitializeResolver()
     -- the core delegates winner-picking here, handing us exactly one lot's responses by id.
     if self.lootCore then
@@ -75,22 +91,16 @@ end
 -- compete equally. Used for non-BiS responses (MS/MU/OS/TM), where status is only meant to gate
 -- "raider on the roster" vs "nil". For BiS, Mains still outrank DesignatedAlts.
 function addon:FilterByStatus(candidates, mergeMainAndAlt)
-    local function effectiveRank(status)
-        local r = util:StatusRank(status)
-        if mergeMainAndAlt and r == 3 then return 2 end
-        return r
-    end
-
     local highestEffective = 0
     local survivors = {}
     local highestActual = 0
 
     for _, candidate in ipairs(candidates) do
-        highestEffective = math.max(highestEffective, effectiveRank(candidate.status))
+        highestEffective = math.max(highestEffective, effectiveStatusRank(candidate.status, mergeMainAndAlt))
     end
 
     for _, candidate in ipairs(candidates) do
-        if effectiveRank(candidate.status) == highestEffective then
+        if effectiveStatusRank(candidate.status, mergeMainAndAlt) == highestEffective then
             survivors[#survivors + 1] = candidate
             highestActual = math.max(highestActual, util:StatusRank(candidate.status))
         end
@@ -424,12 +434,6 @@ function addon:SelectWinningRolls(rolls, quantity)
     return winners
 end
 
-local function effectiveStatusRank(status, mergeMainAndAlt)
-    local r = util:StatusRank(status)
-    if mergeMainAndAlt and r == 3 then return 2 end
-    return r
-end
-
 function addon:CollectPriorityWinnerCandidates(rule, candidates, matcher, quantity, allRollByName, mergeMainAndAlt)
     local orderedCandidates = {}
     local chosen = {}
@@ -531,7 +535,7 @@ function addon:BuildResultRecord(item, allRollerNames, allRollerDetails, lcNames
         allRollerDetails = allRollerDetails or {},
         lcNamesText = lcNamesText,
         specPriorityText = specPriorityText,
-        statusTierText = statusRank == 3 and "Main" or (statusRank == 2 and "Designated Alt" or "Nil"),
+        statusTierText = statusTierTextForRank(statusRank),
         prioritizedNames = prioritizedNames,
         finalRolls = rolls,
         rollDetails = rollDetails or {},
@@ -562,7 +566,7 @@ function addon:BuildLootCouncilResultRecord(item, allRollerNames, allRollerDetai
         allRollerDetails = allRollerDetails or {},
         lcNamesText = lcNamesText,
         specPriorityText = specPriorityText,
-        statusTierText = statusRank == 3 and "Main" or (statusRank == 2 and "Designated Alt" or "Nil"),
+        statusTierText = statusTierTextForRank(statusRank),
         prioritizedNames = prioritizedNames or {},
         finalRolls = {},
         rollDetails = {},

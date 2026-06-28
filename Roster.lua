@@ -105,10 +105,6 @@ function addon:GetRosterDisplayList()
     return self.roster.rosterDisplay or {}
 end
 
-local function stripRealm(name)
-    return name and string.match(name, "^[^-]+") or name
-end
-
 -- Determine the master looter's name and whether *we* drive WeirdLoot, robustly across
 -- every group shape (mirrors RCLootCouncil's GetML): raid master-loot, party master-loot,
 -- raid leader/assistant, party leader, and solo. The leadership fallback only applies when
@@ -128,12 +124,12 @@ function addon:RefreshLootAuthority()
         -- before the raid roster loads (in that race numRaid is also 0 but so is numParty -- we
         -- have no group at all -- which the gate rejects, blocking the ex-ML self-claim).
         if raidMasterIndex and raidMasterIndex > 0 then
-            lootMasterName = stripRealm(GetRaidRosterInfo(raidMasterIndex))   -- ML in raid
+            lootMasterName = util:StripRealm(GetRaidRosterInfo(raidMasterIndex))   -- ML in raid
         elseif numRaid == 0 and numParty > 0 then
             if partyMasterIndex == 0 then
                 lootMasterName = playerName                                        -- we are party ML
             elseif partyMasterIndex and partyMasterIndex > 0 then
-                lootMasterName = stripRealm(UnitName("party" .. partyMasterIndex)) -- party member ML
+                lootMasterName = util:StripRealm(UnitName("party" .. partyMasterIndex)) -- party member ML
             end
         end
     end
@@ -143,7 +139,7 @@ function addon:RefreshLootAuthority()
     if numRaid > 0 then
         for index = 1, numRaid do
             local name, rank = GetRaidRosterInfo(index)
-            if playerName and name and util:NormalizeKey(stripRealm(name)) == util:NormalizeKey(playerName) then
+            if playerName and name and util:NormalizeKey(util:StripRealm(name)) == util:NormalizeKey(playerName) then
                 isLeader = (rank == 2) or (rank == 1)    -- raid leader or assistant
                 break
             end

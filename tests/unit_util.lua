@@ -212,6 +212,31 @@ H.test("util:ClassNameToToken: handles localized + shorthand class names", funct
 end)
 
 ------------------------------------------------------------------------
+-- util:StripRealm
+------------------------------------------------------------------------
+H.test("util:StripRealm: drops the realm suffix", function()
+    H.eq(util:StripRealm("Bob-Moonrunner"), "Bob", "Bob-Moonrunner -> Bob")
+    H.eq(util:StripRealm("alice"), "alice", "no realm -> unchanged")
+    H.eq(util:StripRealm("death-knight-tonic"), "death", "multiple dashes -> keep only up to the first")
+end)
+
+H.test("util:StripRealm: nil and non-string inputs pass through", function()
+    H.eq(util:StripRealm(nil), nil, "nil -> nil")
+    H.eq(util:StripRealm(42), 42, "number -> number")
+end)
+
+H.test("util:StripRealm: empty string and empty-realm edge cases", function()
+    -- Documenting current behavior (matches the original Roster.lua stripRealm): the regex
+    -- "[^-]+" matches zero characters at the start of "-Moonrunner", yielding an empty string.
+    -- But Lua's `or` short-circuits on falsy values: an empty string is truthy in Lua, so
+    -- `emptyString or "-Moonrunner"` evaluates to `""` ... except `string.match` actually returns
+    -- nil for zero-width matches (not an empty string), so the `or name` fallback fires. Verify
+    -- the actual behavior matches the original (both return the input unchanged).
+    H.eq(util:StripRealm(""), "", "empty string -> empty (matches [])")
+    H.eq(util:StripRealm("-Moonrunner"), "-Moonrunner", "no short name -> input unchanged (regex matches zero-width, returns nil, fallback fires)")
+end)
+
+------------------------------------------------------------------------
 -- util:TierTokenClassSet
 ------------------------------------------------------------------------
 H.test("util:TierTokenClassSet: returns class set for a known token", function()
