@@ -49,3 +49,4 @@ UI\RaidersTab.lua
 UI\ResultsTab.lua
 UI\MasterTab.lua
 UI\OptionsTab.lua
+UI\LootTab.lua
