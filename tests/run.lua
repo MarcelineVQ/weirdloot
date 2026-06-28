@@ -1665,6 +1665,56 @@ test("manual hand-trade of a NON-owed item delivers nothing (no phantom)", funct
     eq(owedCount(w), 1, "owe for 40005 untouched by trading an unrelated item")
 end)
 
+-- Allow All Trades OFF (autoCancel): decline UNSOLICITED incoming trades, but never a trade the ML
+-- starts. ChromieCraft does not fire TRADE_REQUEST, so the discriminator is the InitiateTrade hook:
+-- a trade the ML opens arms _selfInitiated; an incoming trade does not. Helpers reach the lib flag and
+-- the client's own failure strings (so the match stays locale-independent in the test too).
+local function tdLib(w) return w.env.LibStub("TradeDeliver-1.0") end
+local function armSelfInitiate(w) tdLib(w)._selfInitiated = true end       -- simulate the InitiateTrade hook
+local function tooFarMsg(w) return w.env.ERR_TRADE_TOO_FAR or "Trade target is too far away." end
+local function busyMsg(w) return string.format(w.env.ERR_PLAYER_BUSY_S or "%s is busy right now.", "Stranger") end
+
+test("autoCancel: an unsolicited incoming trade is declined", function()
+    local w = makeWorld("Masterlooter", true)
+    w.addon.payout:SetAutoCancel(true)
+    setPartner(w, "Stranger")
+    w.env.__closeTrade = 0
+    fireEvent(w, "TRADE_SHOW")                    -- incoming: no InitiateTrade armed the flag
+    eq(w.env.__closeTrade, 1, "unsolicited trade is closed by autoCancel")
+end)
+
+test("autoCancel: a self-initiated trade is allowed", function()
+    local w = makeWorld("Masterlooter", true)
+    w.addon.payout:SetAutoCancel(true)
+    setPartner(w, "Friend")
+    w.env.__closeTrade = 0
+    armSelfInitiate(w)                            -- the ML opened it (InitiateTrade hook)
+    fireEvent(w, "TRADE_SHOW")
+    eq(w.env.__closeTrade, 0, "a trade the ML starts is not declined even with autoCancel on")
+end)
+
+test("autoCancel: a failed self-initiate (too far) disarms; the next incoming trade is declined", function()
+    local w = makeWorld("Masterlooter", true)
+    w.addon.payout:SetAutoCancel(true)
+    setPartner(w, "Stranger")
+    w.env.__closeTrade = 0
+    armSelfInitiate(w)                            -- ML tried to open a trade...
+    fireEvent(w, "UI_ERROR_MESSAGE", tooFarMsg(w))   -- ...but it failed (too far): disarm
+    fireEvent(w, "TRADE_SHOW")                    -- now an incoming trade opens
+    eq(w.env.__closeTrade, 1, "stale arm cleared by the too-far error, so the incoming trade is declined")
+end)
+
+test("autoCancel: a failed self-initiate (busy, system message) disarms; next incoming trade declined", function()
+    local w = makeWorld("Masterlooter", true)
+    w.addon.payout:SetAutoCancel(true)
+    setPartner(w, "Stranger")
+    w.env.__closeTrade = 0
+    armSelfInitiate(w)                            -- ML tried to open a trade...
+    fireEvent(w, "CHAT_MSG_SYSTEM", busyMsg(w))   -- ...target busy: announced only via CHAT_MSG_SYSTEM
+    fireEvent(w, "TRADE_SHOW")                    -- now an incoming trade opens
+    eq(w.env.__closeTrade, 1, "stale arm cleared by ERR_PLAYER_BUSY_S, so the incoming trade is declined")
+end)
+
 test("trade engine: short stock delivers what it can, rest stays owed", function()
     local w = makeWorld("Masterlooter", true)
     startSession(w)

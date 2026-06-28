@@ -1568,8 +1568,9 @@ function addon:BuildMasterTab()
         addon:TogglePayout()
     end)
 
-    -- Allow-all-trades toggle. Default ON. When OFF, every incoming trade is declined.
-    local allowTradesButton = createButton(panel, "Allow All Trades: ON", 160, 24)
+    -- Incoming-trades toggle. Default ON. When OFF, UNSOLICITED incoming trades are declined;
+    -- trades the ML starts always go through (and still auto-fill owed items).
+    local allowTradesButton = createButton(panel, "Incoming Trades: ON", 160, 24)
     allowTradesButton:SetPoint("LEFT", payoutButton, "RIGHT", 8, 0)
     allowTradesButton:SetScript("OnClick", function()
         addon:ToggleAllowAllTrades()
@@ -1662,14 +1663,16 @@ function addon:BuildMasterTab()
     panel.payoutButton = payoutButton
     panel.allowTradesButton = allowTradesButton
 
-    setButtonTooltip(allowTradesButton, "Allow All Trades (Toggle)",
-        "When ON (default), incoming trades are allowed to open normally. When OFF, every incoming "
-        .. "trade is auto-declined immediately.")
+    setButtonTooltip(allowTradesButton, "Incoming Trades (Toggle)",
+        "Controls trades OTHERS open with you. When ON (default), incoming trades open normally. When "
+        .. "OFF, unsolicited incoming trades are auto-declined. Trades YOU start (right-click -> Trade) "
+        .. "are never declined and still auto-fill owed items in Payout Mode.")
 
     setButtonTooltip(payoutButton, "Payout Mode (Toggle)",
         "Turn automatic loot delivery on or off. While ON: each winner is whispered to open a trade with you, "
-        .. "and their owed items auto-fill into the trade window (you click Trade to send). If Allow All Trades "
-        .. "is OFF, incoming trades are declined before payout can fill them. Pause keeps the owed list but stops auto-fill.")
+        .. "and their owed items auto-fill into the trade window (you click Trade to send). If Incoming Trades "
+        .. "is OFF, unsolicited incoming trades are declined before payout can fill them (trades you start still fill). "
+        .. "Pause keeps the owed list but stops auto-fill.")
 		
 	setButtonTooltip(startButton, "Start Session",
         "Establishes the active loot session.")
@@ -2985,7 +2988,7 @@ function addon:RefreshMasterTab()
 
     if panel.allowTradesButton then
         local allow = self:IsAllowAllTrades()
-        panel.allowTradesButton:SetText(allow and "Allow All Trades: ON" or "Allow All Trades: OFF")
+        panel.allowTradesButton:SetText(allow and "Incoming Trades: ON" or "Incoming Trades: OFF")
     end
 
     local attendeeCount = #(self:GetAttendees() or {})
