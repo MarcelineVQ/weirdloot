@@ -279,9 +279,25 @@ local function isPureUnique(link)
     return false
 end
 
--- snapshot every bag stack of itemID up front, with stack size and trade-window
--- seconds: { {bag, slot, count, window}, ... }. Taken before any moves so we never
--- re-read a slot we have started emptying. window is nil for non-windowed items.
+-- Is this bag item bound to us right now? A held, non-BoE item shows the left-side ITEM_SOULBOUND
+-- line. Paired with tradeWindowSeconds this tells a PERMANENTLY-bound copy (no window line AND
+-- soulbound) apart from a freely-tradeable one (no window line, not soulbound) -- they look identical
+-- by window alone, because an expired BoP-trade window drops the same tooltip line a freebie never had.
+local SOULBOUND_LINE = ITEM_SOULBOUND or "Soulbound"
+local function isSoulbound(bag, slot)
+    local tip = scanner()
+    tip:ClearLines()
+    tip:SetBagItem(bag, slot)
+    for i = 2, tip:NumLines() do
+        local fs = _G["TradeDeliverScanTipTextLeft" .. i]
+        if fs and fs:GetText() == SOULBOUND_LINE then return true end
+    end
+    return false
+end
+
+-- snapshot every bag stack of itemID up front, with stack size, trade-window seconds, and whether the
+-- copy is tradeable AT ALL: { {bag, slot, count, window, tradeable}, ... }. Taken before any moves so
+-- we never re-read a slot we have started emptying. window is nil for non-windowed items.
 local function collectStacks(itemID)
     local stacks = {}
     for bag = 0, 4 do
@@ -289,9 +305,16 @@ local function collectStacks(itemID)
         for slot = 1, n do
             if GetContainerItemID(bag, slot) == itemID then
                 local _, c = GetContainerItemInfo(bag, slot)
+                local win = tradeWindowSeconds(bag, slot)
                 stacks[#stacks + 1] = {
                     bag = bag, slot = slot, count = c or 1,
-                    window = tradeWindowSeconds(bag, slot),
+                    window = win,
+                    -- Tradeable NOW if it still shows a soulbound-trade window line, or is not bound at
+                    -- all (BoE / freely tradeable). A bound copy whose window lapsed reads window==nil
+                    -- (the line is gone) exactly like a freebie, so the soulbound check is what keeps a
+                    -- permanently-bound copy from ever being handed over. (Mirrors Session.lua's
+                    -- eligible-loot rule; a future pass may centralize both.)
+                    tradeable = (win ~= nil) or (not isSoulbound(bag, slot)),
                 }
             end
         end
@@ -341,7 +364,12 @@ local function windowOf(s) return s.window or math.huge end
 local function selectStacks(stacks, need)
     local pool = {}
     for _, st in ipairs(stacks) do
-        pool[#pool + 1] = { bag = st.bag, slot = st.slot, count = st.count, window = st.window }
+        -- Never select a copy we cannot actually trade (a soulbound item whose trade window lapsed).
+        -- The server would reject it, and placing it is the "handed out an item with no trade duration"
+        -- bug. Excluded here so such a copy is never planned or placed; the owe simply stays unfilled.
+        if st.tradeable ~= false then
+            pool[#pool + 1] = { bag = st.bag, slot = st.slot, count = st.count, window = st.window }
+        end
     end
     table.sort(pool, function(a, b)
         local wa, wb = windowOf(a), windowOf(b)
@@ -415,6 +443,7 @@ function TradeDeliver:New(config)
     e._dbg = config.debug or function() end
     e._onDelivered = config.onDelivered or function() end  -- (player, itemId, count) on trade complete
     e._log = config.log or function() end                  -- (ev, data) trade-flow trace (optional)
+    e.isActive = config.isActive                           -- optional () -> bool; false => automated trade mgmt OFF
     -- autoCancel is a runtime flag (default OFF), not persisted. When ON, every UNSOLICITED incoming
     -- trade (one a partner opens with us) is declined immediately, regardless of payout state or whether
     -- the partner is owed; a trade the loot master STARTS (detected via the InitiateTrade hook) is never
@@ -778,6 +807,16 @@ function Engine:_onTradeShow()
     self.fillGen = self.fillGen + 1        -- cancel any settle/fallback from a prior window
     local partner = baseName(UnitName("NPC"))
     if not partner then return end
+
+    -- ACTIVE-ML-ONLY gate. Automated payout (and the incoming-trade decline) must never run for a
+    -- non-ML: only the loot master holds and hands out owed loot. The owe ledger PERSISTS in saved
+    -- vars and autoCancel is runtime state, so without this a raider who was the ML earlier -- or holds
+    -- any stale owe -- would auto-fill a trade with someone else's owed loot. Hard-block it here.
+    -- FUTURE ML WORK: real mid-raid ML-swap handling (handing off / forgiving owes and authority when
+    -- the loot master changes) will revisit this gate. For now the rule is simply: not the active ML
+    -- means do nothing at all on a trade.
+    if self.isActive and not self.isActive() then return end
+
     local entry, key = self:_owedFor(partner, false)
     self._log("td-show", { partner = partner, payoutActive = self.payoutActive and true or false, owed = entry and #entry.items or 0 })
 
@@ -811,6 +850,7 @@ end
 -- hand-placing items. Idempotent: if a fill is already in flight for this trade
 -- (e.g. auto-payout already started it), it's a no-op. Returns ok, reason.
 function Engine:FillOpenTrade()
+    if self.isActive and not self.isActive() then return false, "Only the active loot master can fill trades." end
     local partner = baseName(UnitName("NPC"))
     if not partner then return false, "No trade window is open." end
     if self.fillState or self.pending then return true end   -- already filling this trade

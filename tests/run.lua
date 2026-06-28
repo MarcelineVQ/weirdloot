@@ -5,8 +5,15 @@
 --
 -- Run from the addon dir:  luajit tests/run.lua
 --
--- The bag/tooltip scan is monkeypatched (we inject eligible counts directly), so we never
+-- Most bag/tooltip eligibility is monkeypatched (we inject eligible counts directly), so we rarely
 -- need GameTooltip line scraping; everything else runs the actual addon code.
+--
+-- EXCEPTION -- item tradeability: the TradeDeliver payout engine decides at place-time whether a held
+-- copy is tradeable by scanning its tooltip (soulbound line + BoP trade-window line). A scan-tooltip
+-- mock (`newScanTip`, in makeWorld below) feeds it real left-lines via putBag(..., { lines = {...} })
+-- or the shorthand { bound = true, win = secs }. The authoritative line strings are REAL in-game
+-- captures kept in `tests/tooltip_fixtures.lua` -- use those for any tradeability test instead of
+-- inventing tooltip text (e.g. the "tooltip ground truth" test drives every fixture through the engine).
 
 -- UI.lua is intentionally omitted: it is pure presentation and pulls in heavy FrameXML
 -- (FauxScrollFrame_*, templates) irrelevant to loot accounting. The projections the tests
@@ -100,8 +107,39 @@ local function makeWorld(playerName, isML)
         return r
     end
 
+    -- Scan-tooltip mock for the TradeDeliver lib's hidden GameTooltip. A bag item may declare
+    -- { bound = true, win = secs }; SetBagItem then exposes the matching ITEM_SOULBOUND / trade-window
+    -- lines so the engine's isSoulbound / tradeWindowSeconds read real data (default: no extra lines).
+    local function newScanTip()
+        local tip, cur = newFrame(), nil
+        local function rebuild()
+            local lines
+            if cur and cur.lines then
+                lines = cur.lines                       -- verbatim real tooltip (see tooltip_fixtures.lua)
+            else
+                lines = { "ItemName" }
+                if cur and cur.bound then lines[#lines + 1] = env.ITEM_SOULBOUND end
+                if cur and cur.win   then lines[#lines + 1] = string.format(env.BIND_TRADE_TIME_REMAINING, cur.win .. " sec") end
+            end
+            tip.__lines = lines
+            for i = 1, 32 do
+                env["TradeDeliverScanTipTextLeft" .. i] = (lines[i] and lines[i] ~= "") and { GetText = function() return lines[i] end } or nil
+            end
+        end
+        tip.ClearLines = function() end
+        tip.SetBagItem = function(_, bag, slot) cur = env.__bags[bag] and env.__bags[bag][slot]; rebuild() end
+        tip.SetHyperlink = function() cur = nil; rebuild() end
+        tip.NumLines = function() return tip.__lines and #tip.__lines or 0 end
+        rebuild()
+        return tip
+    end
+
     -- ---- WoW API stubs ----
-    env.CreateFrame = function(_, name) local f = newFrame(); if name then env[name] = f end; return f end
+    env.CreateFrame = function(_, name)
+        local f = (name == "TradeDeliverScanTip") and newScanTip() or newFrame()
+        if name then env[name] = f end
+        return f
+    end
     env.UIParent = newFrame()
     env.WorldFrame = newFrame()
     env.GameTooltip = newFrame()
@@ -172,7 +210,8 @@ local function makeWorld(playerName, isML)
     env.__cursor = nil                               -- item held on the cursor
     env.__tradePartner = nil                         -- UnitName("NPC")
     env.__tradeSlots = 0                             -- placed trade slots this window
-    env.BIND_TRADE_TIME_REMAINING = "You may trade this item with %s for %s."
+    -- real 3.3.5a/ChromieCraft wording (captured in-game): one %s, the remaining duration
+    env.BIND_TRADE_TIME_REMAINING = "You may trade this item with players that were also eligible to loot this item for the next %s."
 
     env.GetContainerNumSlots = function(bag) local B = env.__bags[bag]; return B and B.size or 0 end
     env.GetContainerItemID = function(bag, slot)
@@ -366,7 +405,14 @@ local function makeRng(seed)
 end
 
 -- physical bag (drives TradeDeliver), distinct from the eligible-count model (drives reconcile)
-local function putBag(w, bag, slot, id, count) w.env.__bags[bag][slot] = { id = id, count = count, link = linkFor(id) } end
+-- opts (optional): drive the scan-tooltip mock for this slot. { bound = true, win = secs } synthesizes
+-- soulbound / trade-window lines; { lines = {...} } supplies a verbatim real tooltip (tooltip_fixtures).
+-- Default: a plain tradeable item.
+local function putBag(w, bag, slot, id, count, opts)
+    w.env.__bags[bag][slot] = { id = id, count = count, link = linkFor(id),
+                                bound = opts and opts.bound, win = opts and opts.win,
+                                lines = opts and opts.lines }
+end
 local function fillBagsExcept(w)             -- occupy every empty slot so no split target exists
     for b = 0, 4 do local B = w.env.__bags[b]; for s = 1, B.size do if not B[s] then B[s] = { id = 99999, count = 1, link = linkFor(99999) } end end end
 end
@@ -1713,6 +1759,76 @@ test("autoCancel: a failed self-initiate (busy, system message) disarms; next in
     fireEvent(w, "CHAT_MSG_SYSTEM", busyMsg(w))   -- ...target busy: announced only via CHAT_MSG_SYSTEM
     fireEvent(w, "TRADE_SHOW")                    -- now an incoming trade opens
     eq(w.env.__closeTrade, 1, "stale arm cleared by ERR_PLAYER_BUSY_S, so the incoming trade is declined")
+end)
+
+-- Fix: automated payout is hard-gated to the ACTIVE ML. InitializePayout runs on every client and the
+-- owe ledger persists in saved vars, so without the gate a raider who was ML earlier -- or holds any
+-- stale owe -- would auto-fill a trade with someone else's owed loot (the reported raider-A bug).
+test("payout is ML-only: a non-ML never auto-fills a trade, even with a stale owe", function()
+    local w = makeWorld("Raidernonml", false)
+    eq(w.addon:IsAuthorizedLootMaster(), false, "world is not the active ML")
+    w.addon.payout:Owe("Bob", 40005, 1, linkFor(40005))   -- stale owe in this client's persisted ledger
+    putBag(w, 0, 1, 40005, 1, { win = 7200 })             -- and a perfectly tradeable copy in their bags
+    setPartner(w, "Bob")
+    w.env.__tradeSlots = 0
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)
+    eq(w.env.__tradeSlots, 0, "non-ML placed nothing: the active-ML gate blocked auto-fill")
+end)
+
+-- Fix (critical): never hand out an item with no trade duration. A won BoP copy whose 2h window lapsed
+-- is permanently soulbound -- it reads window==nil just like a freebie, so the soulbound check is what
+-- keeps it from being placed. (Ground truth captured in-game: e.g. an expired 40629/43346 copy shows
+-- "Soulbound" and no "You may trade this item..." line, while an in-window copy of the SAME item does.)
+test("payout never places an expired (soulbound, no-window) copy", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    resolveOwedTo(w, 40005, "Alice")
+    eq(owedCount(w), 1, "Alice owed before the trade")
+    putBag(w, 0, 1, 40005, 1, { bound = true })           -- only copy is permanently bound (window gone)
+    setPartner(w, "Alice")
+    w.env.__tradeSlots = 0
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)
+    eq(w.env.__tradeSlots, 0, "nothing placed: the untradeable copy is excluded")
+    eq(owedCount(w), 1, "owe remains -- it was never delivered")
+end)
+
+-- teeth: the duplicate-copy case behind the original bug -- an expired copy AND a windowed copy of the
+-- same item. The windowed one must still be delivered (and the expired one never chosen).
+test("payout places the windowed copy when a duplicate is expired", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    resolveOwedTo(w, 40005, "Alice")
+    putBag(w, 0, 1, 40005, 1, { bound = true })            -- expired copy (no window) -- must be skipped
+    putBag(w, 0, 2, 40005, 1, { bound = true, win = 1800 })-- in-window copy -- must be delivered
+    setPartner(w, "Alice")
+    w.env.__tradeSlots = 0
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)
+    check(w.env.__tradeSlots >= 1, "the windowed copy is delivered even though a duplicate is expired")
+end)
+
+-- Ground truth: run every authoritative in-game tooltip capture through the real engine and assert the
+-- copy is placed IFF it is genuinely tradeable. This validates isSoulbound / tradeWindowSeconds against
+-- REAL ChromieCraft strings (expired BoP, in-window BoP, BoE, the 40629/43346 duplicate copies).
+test("tooltip ground truth: tradeability is derived correctly from real captured tooltips", function()
+    local fixtures = dofile("tests/tooltip_fixtures.lua")
+    check(#fixtures > 0, "fixtures loaded")
+    for _, fx in ipairs(fixtures) do
+        local w = makeWorld("Masterlooter", true)
+        w.addon.payout:Owe("Alice", fx.id, 1, fx.link)
+        putBag(w, 0, 1, fx.id, 1, { lines = fx.lines })
+        setPartner(w, "Alice")
+        w.env.__tradeSlots = 0
+        fireEvent(w, "TRADE_SHOW")
+        for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+        pump(w, 1.0)
+        eq(w.env.__tradeSlots >= 1, fx.tradeable, fx.name)
+    end
 end)
 
 test("trade engine: short stock delivers what it can, rest stays owed", function()
