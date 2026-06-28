@@ -45,3 +45,4 @@ AutoLoot.lua
 UI.lua
 UI\Export.lua
 UI\Minimap.lua
+UI\RaidersTab.lua
