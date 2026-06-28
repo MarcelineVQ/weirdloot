@@ -32,6 +32,7 @@ local makeRng, putBag, fillBagsExcept = F.makeRng, F.putBag, F.fillBagsExcept
 local fireEvent, pump, setPartner = F.fireEvent, F.pump, F.setPartner
 local runTrade, runManualTrade, resolveOwedTo = F.runTrade, F.runManualTrade, F.resolveOwedTo
 local linkFor = F.linkFor
+local flushTaplistBounces = F.flushTaplistBounces
 -- All mutable test state lives on the framework: WIRE (the recorded wire queue) and CLOCK
 -- (the simulated clock). Tests read F.WIRE / F.CLOCK directly so they always see the current
 -- queue/clock even after flushWireTo reassigns F.WIRE to a fresh table.
@@ -1493,6 +1494,157 @@ test("trade engine: ML pulls a rejected unique before re-accepting; only traded 
         if m.target == "Alice" and m.text:find("open another trade", 1, true) then nagged = true end
     end
     check(not nagged, "no futile re-open nudge after a rejection")
+end)
+
+-- ---- taplist (BoP eligible-looter) duplicate retry ---------------------------
+-- Shared setup: a winner owed ONE token; the ML holds duplicate tradeable copies (looted from
+-- different kills, so different eligible-looter sets) plus a permanently-bound third copy that must
+-- never be offered. `elig` is the SERVER's per-instance taplist, invisible to the addon.
+local function spyDelivered(w)
+    local marked = {}
+    local core = w.addon.lootCore
+    local orig = core.MarkDeliveredFor
+    core.MarkDeliveredFor = function(self, player, itemId, when) marked[itemId] = true; return orig(self, player, itemId, when) end
+    return marked
+end
+local function spyWhispers(w)
+    local whispers = {}
+    w.env.ChatThrottleLib.SendChatMessage = function(_, _, _, text, chatType, _, target)
+        if chatType == "WHISPER" then whispers[#whispers + 1] = { text = text, target = target } end
+    end
+    return whispers
+end
+
+test("taplist: ineligible copy bounces, the next eligible copy is auto-placed and delivered", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon.payout:Owe("Dremera", 40629, 1, linkFor(40629))
+    putBag(w, 0, 1, 40629, 1, { win = 3600, elig = { Flab = true } })       -- soonest-to-expire, INELIGIBLE
+    putBag(w, 0, 2, 40629, 1, { win = 7200, elig = { Dremera = true } })    -- the eligible copy
+    putBag(w, 0, 3, 40629, 1, { bound = true })                            -- permanently soulbound: never offered
+    local marked = spyDelivered(w)
+    local prints = {}
+    local origPrint = w.addon.payout._print
+    w.addon.payout._print = function(s) prints[#prints + 1] = s; return origPrint(s) end
+    w.addon.payout:StartPayout()
+
+    setPartner(w, "Dremera")
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)                       -- finalize the fill: places the soonest (ineligible) copy first
+    flushTaplistBounces(w)             -- server bounces it; engine places the eligible copy in its place
+    fireEvent(w, "TRADE_ACCEPT_UPDATE", 1, 1)
+    fireEvent(w, "UI_INFO_MESSAGE", w.env.ERR_TRADE_COMPLETE)
+
+    eq(owedCount(w), 0, "owe cleared: the eligible duplicate was delivered after the bounce")
+    check(marked[40629], "the token was reported delivered to the core")
+    check(not w.addon.payout.lastTradeError, "a recovered bounce sets no trade-wide failure")
+    local skipNote = false
+    for _, s in ipairs(prints) do
+        if s:find("skipped 1 ineligible copy of", 1, true) and s:find("Dremera", 1, true) then skipNote = true end
+    end
+    check(skipNote, "ML told one ineligible copy was skipped before the trade")
+end)
+
+test("taplist: ML is told the count when several copies are skipped to reach an eligible one", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon.payout:Owe("Dremera", 40629, 1, linkFor(40629))
+    putBag(w, 0, 1, 40629, 1, { win = 1800, elig = { Flab = true } })      -- skipped 1st
+    putBag(w, 0, 2, 40629, 1, { win = 3600, elig = { Borg = true } })      -- skipped 2nd
+    putBag(w, 0, 3, 40629, 1, { win = 7200, elig = { Dremera = true } })   -- the eligible copy
+    local prints = {}
+    local origPrint = w.addon.payout._print
+    w.addon.payout._print = function(s) prints[#prints + 1] = s; return origPrint(s) end
+    w.addon.payout:StartPayout()
+
+    setPartner(w, "Dremera")
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)
+    flushTaplistBounces(w)             -- bounces through both ineligible copies before the eligible one
+    fireEvent(w, "TRADE_ACCEPT_UPDATE", 1, 1)
+    fireEvent(w, "UI_INFO_MESSAGE", w.env.ERR_TRADE_COMPLETE)
+
+    eq(owedCount(w), 0, "delivered the eligible copy after skipping two")
+    local told = false
+    for _, s in ipairs(prints) do
+        if s:find("skipped 2 ineligible copies of", 1, true) and s:find("Dremera", 1, true) then told = true end
+    end
+    check(told, "ML told exactly two copies were skipped (plural)")
+end)
+
+test("taplist: every copy ineligible -> nothing traded, owe kept, both sides informed", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon.payout:Owe("Dremera", 40629, 1, linkFor(40629))
+    putBag(w, 0, 1, 40629, 1, { win = 3600, elig = { Flab = true } })
+    putBag(w, 0, 2, 40629, 1, { win = 7200, elig = { Flab = true } })
+    local marked = spyDelivered(w)
+    local whispers = spyWhispers(w)
+    local prints = {}
+    local origPrint = w.addon.payout._print
+    w.addon.payout._print = function(s) prints[#prints + 1] = s; return origPrint(s) end
+    w.addon.payout:StartPayout()
+
+    setPartner(w, "Dremera")
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)
+    flushTaplistBounces(w)             -- both copies bounce in turn; the engine runs out of copies
+
+    -- both sides are told the MOMENT the slot is known unfillable, while the trade is STILL OPEN --
+    -- before any TRADE_CLOSED / completion.
+    local told = false
+    for _, m in ipairs(whispers) do
+        if m.target == "Dremera" and m.text:find("eligible for the item when the boss died", 1, true)
+           and m.text:find("Item40629", 1, true) then told = true end
+    end
+    check(told, "recipient whispered immediately on exhaustion, mid-trade")
+    local mlTold = false
+    for _, s in ipairs(prints) do
+        if s:find("no copy this player was eligible to loot", 1, true) then mlTold = true end
+    end
+    check(mlTold, "ML told immediately on exhaustion, mid-trade")
+    check(not w.addon.payout.lastTradeError, "no trade-wide cause set: reporting was immediate, not at close")
+
+    fireEvent(w, "TRADE_CLOSED")       -- the window has nothing left; it closes
+    pump(w, 0.6)                       -- the deferred close decision stays quiet (already informed)
+
+    eq(owedCount(w), 1, "owe is KEPT: a future eligible copy could still fill it")
+    check(not marked[40629], "nothing was reported delivered")
+    local dupTold = 0
+    for _, m in ipairs(whispers) do
+        if m.target == "Dremera" and m.text:find("eligible for the item when the boss died", 1, true) then dupTold = dupTold + 1 end
+    end
+    eq(dupTold, 1, "recipient told exactly once (no duplicate at close)")
+end)
+
+test("taplist: owed 2 but only one eligible copy -> one delivered, one kept and reported", function()
+    local w = makeWorld("Masterlooter", true)
+    startSession(w)
+    w.addon.payout:Owe("Dremera", 40629, 2, linkFor(40629))
+    putBag(w, 0, 1, 40629, 1, { win = 3600, elig = { Flab = true } })      -- ineligible
+    putBag(w, 0, 2, 40629, 1, { win = 7200, elig = { Dremera = true } })   -- eligible
+    local marked = spyDelivered(w)
+    local whispers = spyWhispers(w)
+    w.addon.payout:StartPayout()
+
+    setPartner(w, "Dremera")
+    fireEvent(w, "TRADE_SHOW")
+    for b = 0, 4 do fireEvent(w, "BAG_UPDATE", b) end
+    pump(w, 1.0)                       -- both copies placed (owed 2); no spare copy to retry with
+    flushTaplistBounces(w)             -- the ineligible one bounces and cannot be replaced
+    fireEvent(w, "TRADE_ACCEPT_UPDATE", 1, 1)
+    fireEvent(w, "UI_INFO_MESSAGE", w.env.ERR_TRADE_COMPLETE)
+
+    eq(owedCount(w), 1, "one copy delivered, one still owed")
+    check(marked[40629], "the eligible copy was delivered")
+    local told = false
+    for _, m in ipairs(whispers) do
+        if m.target == "Dremera" and m.text:find("eligible for the item when the boss died", 1, true) then told = true end
+    end
+    check(told, "recipient told the remaining copy could not be traded to them")
 end)
 
 test("trade engine: several uniques held back -- names each PURE-unique candidate, excludes unique-equipped", function()

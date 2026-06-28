@@ -232,6 +232,17 @@ function self.makeWorld(playerName, isML)
     env.IsPartyLeader = function() return isML end
     env.UnitIsRaidLeader = function(unit) return unit == "player" and isML end
     env.UnitIsRaidOfficer = function(unit) return unit == "player" and isML end
+    -- Mirror the client's addon metadata: read the real `## Version:` from the .toc so addon.version in
+    -- tests matches what ships (the addon pulls its version from here too). cwd is the addon root.
+    env.GetAddOnMetadata = function(_, key)
+        if key ~= "Version" then return nil end
+        local f = io.open("WeirdLoot.toc", "r")
+        if not f then return nil end
+        local v
+        for line in f:lines() do v = line:match("^## Version:%s*(.-)%s*$"); if v then break end end
+        f:close()
+        return v
+    end
     env.SendChatMessage = function() end
     env.SendAddonMessage = function() end
     env.ChatThrottleLib = { SendChatMessage = function() end }
@@ -244,6 +255,7 @@ function self.makeWorld(playerName, isML)
     env.ERR_TRADE_MAX_COUNT_EXCEEDED = "You have too many of a unique item."
     env.ERR_TRADE_TARGET_MAX_COUNT_EXCEEDED = "Your trade partner has too many of a unique item."
     env.ERR_TRADE_TARGET_BAG_FULL = "Trade failed, target doesn't have enough space."
+    env.ERR_TRADE_NOT_ON_TAPLIST = "You may only trade bound items to players that were originally eligible to loot the item."
     env.UI_INFO_MESSAGE = "UI_INFO_MESSAGE"
     env.MAX_TRADABLE_ITEMS = 6
     env.CloseTrade = function() env.__closeTrade = env.__closeTrade + 1 end
@@ -308,7 +320,9 @@ function self.makeWorld(playerName, isML)
         else env.__cursor = env.__bags[bag] and env.__bags[bag][slot]; if env.__bags[bag] then env.__bags[bag][slot] = nil end end
     end
     env.TradeFrame_GetAvailableSlot = function() if env.__tradeSlots >= 6 then return nil end; env.__tradeSlots = env.__tradeSlots + 1; return env.__tradeSlots end
-    env.ClickTradeButton = function() env.__cursor = nil end   -- item moves into the trade window
+    -- the held item moves into trade slot `tslot`; record it so GetTradePlayerItemLink residency reads
+    -- reflect reality (the engine's taplist-retry detects a bounce by a slot going empty).
+    env.ClickTradeButton = function(tslot) env.__tradePlaced[tslot] = env.__cursor; env.__cursor = nil end
     env.SlashCmdList = {}
     env.StaticPopupDialogs = {}
     env.StaticPopup_Show = function() return newFrame() end
@@ -530,9 +544,13 @@ end
 -- soulbound / trade-window lines; { lines = {...} } supplies a verbatim real tooltip (tooltip_fixtures).
 -- Default: a plain tradeable item.
 function self.putBag(w, bag, slot, id, count, opts)
+    -- elig (optional): a { [partnerName]=true } set marking the ONLY players the server recorded as
+    -- eligible to loot THIS copy. nil means eligible to everyone. flushTaplistBounces reads it to mimic
+    -- the server bouncing an ineligible BoP copy out of the trade window. The engine never sees it (no
+    -- client API exposes the taplist), exactly as in-game.
     w.env.__bags[bag][slot] = { id = id, count = count, link = self.linkFor(id),
                                 bound = opts and opts.bound, win = opts and opts.win,
-                                lines = opts and opts.lines }
+                                lines = opts and opts.lines, elig = opts and opts.elig }
 end
 function self.fillBagsExcept(w)             -- occupy every empty slot so no split target exists
     for b = 0, 4 do local B = w.env.__bags[b]; for s = 1, B.size do if not B[s] then B[s] = { id = 99999, count = 1, link = self.linkFor(99999) } end end end
@@ -543,7 +561,31 @@ function self.fireEvent(w, event, arg1, arg2)
     if fn then fn(fr, event, arg1, arg2) end
 end
 function self.pump(w, dt) for f, fn in pairs(w.env.__onUpdates) do fn(f, dt or 1.0) end end
-function self.setPartner(w, name) w.env.__tradePartner = name; w.env.__tradeSlots = 0 end
+function self.setPartner(w, name) w.env.__tradePartner = name; w.env.__tradeSlots = 0; w.env.__tradePlaced = {} end
+
+-- Mimic the server bouncing every taplist-ineligible BoP copy out of the open trade window. Models the
+-- REAL packet ordering that broke the first in-game attempt: the UI_ERROR lands FIRST, while the copy is
+-- still resident in the slot, and the eviction (slot clears, copy returns to bags) arrives a frame
+-- later. A synchronous residency check at error time would therefore still see the copy and never retry;
+-- the engine defers its scan past the eviction. Loops until no ineligible copy remains in the window.
+function self.flushTaplistBounces(w)
+    local env = w.env
+    for _ = 1, 32 do                                   -- guard against a pathological non-convergence
+        local hitSlot, hitItem
+        for slot, it in pairs(env.__tradePlaced) do
+            if it and it.elig and not it.elig[env.__tradePartner] then hitSlot, hitItem = slot, it; break end
+        end
+        if not hitSlot then return end
+        self.fireEvent(w, "UI_ERROR_MESSAGE", env.ERR_TRADE_NOT_ON_TAPLIST)  -- error first: copy still resident
+        env.__tradePlaced[hitSlot] = nil               -- a frame later: the bounced copy leaves the slot
+        for b = 0, 4 do                                -- and returns to the first free bag slot
+            local B = env.__bags[b]; local placed = false
+            for s = 1, B.size do if not B[s] then B[s] = hitItem; placed = true break end end
+            if placed then break end
+        end
+        self.pump(w, 0.3)   -- now the engine's deferred scan fires, sees the empty slot, places the next copy
+    end
+end
 
 -- full trade sequence the engine reacts to: partner opens trade -> (bag updates for any splits)
 -- -> settle timer fires the fill -> the trade completes.

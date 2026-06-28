@@ -30,4 +30,14 @@ H.test("WeirdLoot.toc: every file path uses backslashes, never forward slashes",
     H.eq(#offenders, 0, "forward-slash toc paths (won't load in-game): " .. table.concat(offenders, " | "))
 end)
 
+H.test("addon.version is pulled from the .toc, not hardcoded", function()
+    local fh = assert(io.open("WeirdLoot.toc", "r"))
+    local tocVersion
+    for line in fh:lines() do tocVersion = line:match("^## Version:%s*(.-)%s*$"); if tocVersion then break end end
+    fh:close()
+    H.check(tocVersion and tocVersion ~= "", "the toc declares a ## Version:")
+    local w = H.makeWorld("Masterlooter", true)
+    H.eq(w.addon.version, tocVersion, "Core.lua reads its version from the toc via GetAddOnMetadata")
+end)
+
 F.endSuite()

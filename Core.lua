@@ -23,10 +23,10 @@ addon = WeirdLoot
 
 addon.name = addonName or "WeirdLoot"
 addon.prefix = "WeirdLoot"
--- Future versions should simply pull the version from the .toc via
--- GetAddOnMetadata("WeirdLoot", "Version"), but since we're iterating frequently
--- this should show live, so a .lua file based version is correct.
-addon.version = "1.2.0"
+-- The .toc `## Version:` is the single source of truth; pull it at load instead of duplicating the
+-- string here (which drifted from the toc and had to be bumped in lockstep). Debug.lua already reads
+-- it the same way. Fallback keeps a non-nil string if the metadata API is ever absent.
+addon.version = (GetAddOnMetadata and GetAddOnMetadata(addon.name, "Version")) or "dev"
 addon.callbacks = {}
 addon.events = CreateFrame("Frame")
 

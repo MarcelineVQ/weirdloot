@@ -126,6 +126,16 @@ local TRADE_FAIL_REASON = {
     [ERR_TRADE_TARGET_DEAD or "You can't trade with dead players."] = { ml = "recipient is dead", them = "you were dead" },
 }
 
+-- The soulbound-trade eligibility rejection. A BoP copy is only tradeable to players the SERVER recorded
+-- as eligible to loot THAT kill, and the client exposes no way to read that per-instance list, so we
+-- cannot pick the right copy up front. With duplicate tradeable copies (e.g. two of the same token) the
+-- server bounces an ineligible copy back out of the trade slot with this RED error; we react by placing
+-- the NEXT copy into the freed slot. Kept OUT of TRADE_FAIL_REASON on purpose: a bounce we recover from
+-- by retrying must not set a trade-wide failure. TAPLIST_CAUSE phrases the both-sides message sent the
+-- moment the retry loop runs out of eligible copies (during the open trade), not at close.
+local TAPLIST_MSG = ERR_TRADE_NOT_ON_TAPLIST or "You may only trade bound items to players that were originally eligible to loot the item."
+local TAPLIST_CAUSE = { ml = "no copy this player was eligible to loot", them = "you weren't eligible for the item when the boss died" }
+
 -- A trade the local player OPENS can fail before any window appears. When it does, the InitiateTrade
 -- hook already armed selfInitiated, so we must disarm it or a failed open would leak "self-initiated"
 -- onto the next (possibly incoming) trade. Every such failure announces itself immediately:
@@ -501,7 +511,14 @@ function TradeDeliver:New(config)
             -- so capture ungated: _noteTradeError is content-filtered (only known trade-failure strings
             -- match), which can't false-positive on the many unrelated UI_ERROR_MESSAGE lines.
             if e.pending or e.tradeOpen then e:_trace("UIERR [" .. tostring(arg1) .. "]") end
-            e:_noteTradeError(arg1)
+            -- A taplist bounce is recoverable (try the next duplicate copy), so it routes to its own
+            -- retry handler rather than _noteTradeError, which would mark the whole trade failed even
+            -- when a later copy succeeds. Only exhaustion sets a cause, inside _onTaplistReject.
+            if arg1 == TAPLIST_MSG and e.pending then
+                e:_onTaplistReject()
+            else
+                e:_noteTradeError(arg1)
+            end
             -- A self-initiate that failed (too far / dead / self) never opens a window; disarm so it
             -- cannot leak "self-initiated" onto the next (possibly incoming) trade.
             if arg1 and INITIATE_FAIL_MSG[arg1] then TradeDeliver._selfInitiated = nil end
@@ -668,10 +685,27 @@ function Engine:_planTrade(entry)
         if #plan >= MAX_SLOTS then capped = true break end
         local it = rec.it
         local sel, short = selectStacks(rec.stacks, it.count or 1)
+        -- Retry queue for this item: the WINDOWED tradeable copies we did NOT pick. If the server
+        -- bounces a chosen copy as taplist-ineligible, _tryNextCopy places one of these into the freed
+        -- slot. Only windowed (BoP-tradeable) copies can ever trip the eligibility rule, so non-windowed
+        -- mats never build (or consume) a queue. Shared by reference across this item's whole placements
+        -- and popped soonest-to-expire first; `winByKey` marks which chosen slots are windowed.
+        local usedKeys, winByKey, alts = {}, {}, {}
+        for _, st in ipairs(rec.stacks) do winByKey[st.bag * 100 + st.slot] = st.window end
+        for _, s in ipairs(sel) do usedKeys[s.bag * 100 + s.slot] = true end
+        for _, st in ipairs(rec.stacks) do
+            local k = st.bag * 100 + st.slot
+            if st.window ~= nil and st.tradeable ~= false and not usedKeys[k] then
+                alts[#alts + 1] = { bag = st.bag, slot = st.slot, id = it.id, window = st.window }
+            end
+        end
+        table.sort(alts, function(a, b) return (a.window or math.huge) < (b.window or math.huge) end)
         for _, s in ipairs(sel) do
             if #plan >= MAX_SLOTS then capped = true break end
             if s.whole then
-                plan[#plan + 1] = { bag = s.bag, slot = s.slot, qty = s.take, it = it }
+                local windowed = winByKey[s.bag * 100 + s.slot] ~= nil
+                plan[#plan + 1] = { bag = s.bag, slot = s.slot, qty = s.take, it = it,
+                                    alternates = windowed and alts or nil }
             else
                 local fb, fs = findFreeSlot(usedFree)
                 if not fb then
@@ -707,7 +741,10 @@ function Engine:_placePlan(plan)
         ClearCursor()
         PickupContainerItem(p.bag, p.slot)
         ClickTradeButton(tslot)
-        placed[#placed + 1] = { it = p.it, qty = p.qty }
+        -- tslot + alternates ride along so _onTaplistReject can spot which placement bounced (its trade
+        -- slot goes empty) and drop the next eligible copy into that same freed slot.
+        placed[#placed + 1] = { it = p.it, qty = p.qty, bag = p.bag, slot = p.slot,
+                                tslot = tslot, alternates = p.alternates }
         self._dbg(("traded %d x %s (bag %d slot %d -> trade slot %d)"):format(
             p.qty, itemDisplay(p.it), p.bag, p.slot, tslot))
     end
@@ -739,6 +776,7 @@ end
 -- more relevant updates arrive), then trade the dedicated slots.
 local SETTLE = 0.10        -- quiet period after the last relevant BAG_UPDATE
 local FALLBACK = 1.00      -- safety net if an expected BAG_UPDATE never arrives
+local TAPLIST_SETTLE = 0.20  -- let the eviction packet clear our trade slot before scanning to retry
 
 function Engine:_armSettle()
     self.fillGen = self.fillGen + 1
@@ -804,6 +842,7 @@ end
 function Engine:_onTradeShow()
     self.pending = nil
     self.fillState = nil
+    self._taplistInformed = false           -- per-window: set when exhaustion already told both sides
     self.fillGen = self.fillGen + 1        -- cancel any settle/fallback from a prior window
     local partner = baseName(UnitName("NPC"))
     if not partner then return end
@@ -928,6 +967,84 @@ function Engine:_noteTradeError(msg)
     end
 end
 
+-- The server bounced one or more BoP copies out of the trade window: the partner was not on that
+-- instance's eligible-looter list. The error does not name the item, so we find each bounced placement
+-- by residency -- its trade slot now reads empty -- and place the next eligible copy into that same slot
+-- (PickupContainerItem/ClickTradeButton are not hardware-gated, so this runs from the event handler).
+-- Re-armed naturally: a replacement that is ALSO ineligible bounces and fires this again. Only when a
+-- placement runs out of copies do we mark it exhausted and attach TAPLIST_CAUSE so the close/complete
+-- path reports it; the owe stays on the ledger (a future eligible copy could still fill it).
+function Engine:_onTaplistReject()
+    local p = self.pending
+    if not p then return end
+    -- The eviction (our trade slot going empty) rides a SEPARATE server packet that can land a frame
+    -- after this error, so a synchronous GetTradePlayerItemLink can still show the bounced copy resident.
+    -- Defer the scan+retry a beat so the slot has actually cleared. Coalesced by generation: repeated
+    -- taplist errors (e.g. the replacement is also ineligible) collapse to one pending scan.
+    local gen = (self._taplistGen or 0) + 1
+    self._taplistGen = gen
+    after(TAPLIST_SETTLE, function()
+        if self.pending == p and self._taplistGen == gen then self:_retryBouncedCopies(p) end
+    end)
+end
+
+-- Scan every windowed placement; any whose trade slot is now empty was bounced, so place its next
+-- eligible copy. Logs td-taplist per placement (resident? how many alternates left) so a real trade
+-- reveals whether a miss is a residency-timing issue or a missing alternate.
+function Engine:_retryBouncedCopies(p)
+    for i, pl in ipairs(p.placed) do
+        local link = pl.tslot and GetTradePlayerItemLink and GetTradePlayerItemLink(pl.tslot)
+        self._log("td-taplist", { i = i, itemId = pl.it.id, tslot = pl.tslot,
+                                  resident = link and true or false,
+                                  alts = pl.alternates and #pl.alternates or -1 })
+        if pl.alternates and not pl.exhausted and pl.tslot and not link then
+            self:_tryNextCopy(pl)
+        end
+    end
+end
+
+-- Place the next untried eligible copy for a bounced placement into its freed trade slot. Each alternate
+-- is verified to still hold the expected item id (a prior bounce returns its copy to the bags, which in
+-- the rare case could shift a slot), skipping any that no longer match. Exhausts when the queue is empty.
+function Engine:_tryNextCopy(pl)
+    -- We were called because a copy just bounced out of the slot, so one more copy was skipped on the way
+    -- to an eligible one. Counted until a replacement settles (or we exhaust); reported to the ML on
+    -- delivery so they know how many ineligible copies were burned through.
+    pl.skipped = (pl.skipped or 0) + 1
+    local alts = pl.alternates
+    while alts and #alts > 0 do
+        local alt = table.remove(alts, 1)
+        if GetContainerItemID(alt.bag, alt.slot) == pl.it.id then
+            ClearCursor()
+            PickupContainerItem(alt.bag, alt.slot)
+            ClickTradeButton(pl.tslot)
+            pl.bag, pl.slot = alt.bag, alt.slot
+            self._log("td-retry", { itemId = pl.it.id, tslot = pl.tslot, left = #alts })
+            self._dbg(("eligibility bounce: trying another copy of %s (%d left)"):format(itemDisplay(pl.it), #alts))
+            return
+        end
+    end
+    -- No eligible copy remains: tell the ML and the raider RIGHT NOW, the moment we know this slot won't
+    -- fill, rather than waiting for the trade to close/complete. The owe is kept (a future eligible copy
+    -- could still fill it).
+    pl.exhausted = true
+    self._log("td-exhausted", { itemId = pl.it.id })
+    self._dbg(("no eligible copy of %s left for this player"):format(itemDisplay(pl.it)))
+    self:_informTaplistExhausted(pl)
+end
+
+-- Immediate both-sides notification when a placement runs out of eligible copies, fired during the open
+-- trade as soon as the retry loop exhausts. Sets _taplistInformed so the close-time _finishReport does not
+-- re-nudge the same owe with a futile "open another trade" (re-opening can't make an ineligible copy go).
+function Engine:_informTaplistExhausted(pl)
+    local key = self.pending and self.pending.key
+    local entry = key and self.db.owed[key]
+    local name = (entry and entry.name) or baseName(UnitName("NPC")) or "?"
+    self._print(("couldn't trade %s to %s: %s"):format(itemDisplay(pl.it), name, TAPLIST_CAUSE.ml))
+    self:_whisper(name, ("Trade failed, %s: %s"):format(TAPLIST_CAUSE.them, itemDisplay(pl.it)))
+    self._taplistInformed = true
+end
+
 -- Per-itemId counts of what was ACTUALLY in the trade window at accept time -- the agreed transfer.
 -- This is what a completed trade really moved, which can be LESS than what we placed if the ML pulled
 -- an item back out (a rejected unique) and re-accepted the rest. Falls back to the placed plan only
@@ -979,6 +1096,12 @@ function Engine:_onTradeComplete()
             pl.it.count = (pl.it.count or 1) - credit
             total = total + credit
             self._onDelivered(entry.name, pl.it.id, credit)   -- core records where it went
+            -- Only when THIS placement settled on an eligible copy (not an exhausted one credited
+            -- fungibly from another slot's delivery) does the skip count describe a real burn-through.
+            if pl.skipped and pl.skipped > 0 and not pl.exhausted then
+                self._print(("skipped %d ineligible cop%s of %s before trading one to %s"):format(
+                    pl.skipped, pl.skipped == 1 and "y" or "ies", itemDisplay(pl.it), entry.name))
+            end
         end
         if credit < pl.qty then
             undelivered[#undelivered + 1] = { it = pl.it, qty = pl.qty - credit }
@@ -997,7 +1120,8 @@ end
 function Engine:_finishReport(entry, key, total, undelivered)
     -- informed: we have already whispered the recipient WHY an item was held back, so skip the generic
     -- "open another trade" nudge below (re-opening can't fix a rejection -- it would just fail again).
-    local informed = false
+    -- A taplist exhaustion this window already told both sides immediately, so it starts informed.
+    local informed = self._taplistInformed or false
     if #undelivered > 0 then
         local parts = {}
         for _, u in ipairs(undelivered) do parts[#parts + 1] = u.qty .. "x " .. itemDisplay(u.it) end
