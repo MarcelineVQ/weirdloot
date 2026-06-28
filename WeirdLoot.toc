@@ -46,3 +46,4 @@ UI.lua
 UI\Export.lua
 UI\Minimap.lua
 UI\RaidersTab.lua
+UI\ResultsTab.lua
